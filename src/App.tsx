@@ -723,6 +723,7 @@ function SystemPreview({
       start,
       end,
       stemTipX: x + (activeTool === "left" ? -1 : 1) * mmToPixels(stemLengthMm),
+      isBlackKey: isBlack,
       headPath: `M ${headPoints.map(([pointX, pointY]) => `${pointX} ${pointY}`).join(" L ")} Z`,
       body: [[x, start], [x - mmToPixels(semitoneMm), start + mmToPixels(semitoneMm)], [x - mmToPixels(semitoneMm), end], [x + mmToPixels(semitoneMm), end], [x + mmToPixels(semitoneMm), start + mmToPixels(semitoneMm)]],
       stop: [[x - midiHalfWidth, end - height], [x, end], [x + midiHalfWidth, end - height]],
@@ -1079,7 +1080,7 @@ function SystemPreview({
     </g> : null,
     input_overlay: previewGeometry ? <g className="note-input-preview" data-export="exclude">
       {document.layout.note_midinote_visible && <path d={`M ${previewGeometry.body.map(([pointX, pointY]) => `${pointX} ${pointY}`).join(" L ")} Z`} />}
-      {document.layout.note_head_visible && <path d={previewGeometry.headPath} className="note-input-preview-head" style={{ fill: "#000", stroke: "#000" }} strokeWidth={noteStrokePx} />}
+      {document.layout.note_head_visible && <path d={previewGeometry.headPath} className="note-input-preview-head" style={{ fill: previewGeometry.isBlackKey ? "#000" : "none", stroke: "#000" }} strokeWidth={noteStrokePx} />}
       {document.layout.note_stem_visible && <line x1={previewGeometry.x} y1={previewGeometry.start} x2={previewGeometry.stemTipX} y2={previewGeometry.start} stroke="#000" strokeWidth={noteStrokePx} />}
       {document.layout.note_stop_visible && <path d={`M ${previewGeometry.stop.map(([pointX, pointY]) => `${pointX} ${pointY}`).join(" L ")}`} fill="none" strokeWidth={mmToPixels(document.layout.note_stopsign_thickness_mm * scale)} />}
       {document.layout.note_continuation_dot_visible && previewGeometry.dots.map(([x, y], index) => <circle key={index} cx={x} cy={y} r={mmToPixels(document.layout.note_continuation_dot_size_mm * scale) / 2} />)}

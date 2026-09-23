@@ -32,6 +32,14 @@ describe("keyTAB document model", () => {
     expect(restored.pages[0].systems[0].staves[0].events[0]).toMatchObject({ type: "note", time: 256, pitch: 60 });
   });
 
+  it("loads existing keytab2-labelled files and writes the keytab-web format", () => {
+    const serialized = JSON.parse(serializeDocument(createDocument()));
+    serialized.format = "keytab2";
+    const restored = deserializeDocument(serialized);
+    expect(restored.format).toBe("keytab-web");
+    expect(JSON.parse(serializeDocument(restored)).format).toBe("keytab-web");
+  });
+
   it("restores the required initial tempo marker when loading a score without one", () => {
     const serialized = JSON.parse(serializeDocument(createDocument()));
     serialized.timeline_events = [];

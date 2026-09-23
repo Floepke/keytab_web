@@ -1,6 +1,6 @@
 # keyTAB Web
 
-Browser-native foundation for keyTAB, based on the `keyTAB2` document model.
+Browser-native foundation for keyTAB, informed by the `keyTAB2` document model.
 
 ## First Run
 
@@ -18,7 +18,7 @@ Vite prints the local browser URL, normally `http://localhost:5173`.
 
 - Traditional application menu, icon toolbar, status bar, and snap-size dock.
 - A paper-space SVG preview with keyTAB-style stave and grid geometry.
-- TypeScript keyTAB2-compatible document data, base-grid math, typed events, and JSON serialization.
+- TypeScript document data, base-grid math, typed events, and JSON serialization for the `.ktw` web format.
 
 The browser document format is `.ktw` JSON.
 
