@@ -215,6 +215,13 @@ export function createDocument(): KeyTabDocument {
   return document;
 }
 
+export function ensureInitialTempo(document: KeyTabDocument): void {
+  if (!document.timeline_events.some((event) => event.start_tick === 0)) {
+    document.timeline_events.unshift(createEvent("tempo") as TempoEvent);
+  }
+  document.timeline_events.sort((first, second) => first.start_tick - second.start_tick || first.id.localeCompare(second.id));
+}
+
 function parseEvent(raw: unknown): ScoreEvent {
   const data = plainObject(raw);
   const type = data.type;
@@ -345,6 +352,7 @@ export function deserializeDocument(raw: unknown): KeyTabDocument {
     created_at: text(data.created_at, new Date().toISOString()),
     modified_at: text(data.modified_at, new Date().toISOString()),
   };
+  ensureInitialTempo(document);
   reflowPages(document);
   return document;
 }
@@ -392,6 +400,14 @@ export function engravingPtToMm(layout: Layout, points: number, staveScale = 1):
 const eventStartTick = (event: ScoreEvent): number => {
   if (event.type === "note" || event.type === "beam") return event.time;
   if (event.type === "slur") return event.y1_tick;
+  return event.start_tick;
+};
+
+const eventEndTick = (event: ScoreEvent): number => {
+  if (event.type === "note" || event.type === "beam") return event.time + event.duration;
+  if (event.type === "slur") return Math.max(event.y1_tick, event.y2_tick, event.y3_tick, event.y4_tick);
+  if ("duration_ticks" in event) return event.start_tick + event.duration_ticks;
+  if (event.type === "line") return Math.max(event.start_tick, event.time1_tick, event.time2_tick);
   return event.start_tick;
 };
 
@@ -570,9 +586,22 @@ export function removeSystemBreak(document: KeyTabDocument, systemId: string, bo
 }
 
 function syncScoreDuration(document: KeyTabDocument): void {
+  const currentSystems = allSystems(document);
+  const contentEndTick = Math.max(
+    0,
+    ...currentSystems.flatMap((system) => [
+      ...system.events.map(eventEndTick),
+      ...system.staves.flatMap((stave) => stave.events.map(eventEndTick)),
+    ]),
+  );
+  const finalGrid = document.base_grid.at(-1)!;
+  const finalMeasureDuration = measureDuration(finalGrid, document.time_per_quarter);
+  const gridEndTick = totalDuration(document.base_grid, document.time_per_quarter);
+  if (contentEndTick > gridEndTick) {
+    finalGrid.measure_amount += Math.ceil((contentEndTick - gridEndTick) / finalMeasureDuration);
+  }
   const endTick = totalDuration(document.base_grid, document.time_per_quarter);
   const { measures } = gridBoundaries(document.base_grid, document.time_per_quarter);
-  const currentSystems = allSystems(document);
   const boundaries = [0];
   for (const system of currentSystems.slice(0, -1)) {
     const choices = measures.filter((tick) => tick > boundaries.at(-1)! && tick < endTick);

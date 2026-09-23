@@ -9,6 +9,9 @@ interface DesktopBridge {
   saveScore(request: { path: string | null; suggestedName: string; contents: string }): Promise<{ path: string; name: string } | null>;
   loadLastOpenedScore(): Promise<DesktopScoreFile | null>;
   confirmDiscard(action: string): Promise<"save" | "discard" | "cancel">;
+  onCloseRequested(callback: () => void): () => void;
+  approveClose(): void;
+  cancelClose(): void;
 }
 
 const bridge = () => (window as Window & { keytabDesktop?: DesktopBridge }).keytabDesktop ?? null;
@@ -18,3 +21,6 @@ export const openDesktopScore = () => bridge()?.openScore() ?? Promise.resolve(n
 export const saveDesktopScore = (request: { path: string | null; suggestedName: string; contents: string }) => bridge()?.saveScore(request) ?? Promise.resolve(null);
 export const loadLastOpenedDesktopScore = () => bridge()?.loadLastOpenedScore() ?? Promise.resolve(null);
 export const confirmDesktopDiscard = (action: string) => bridge()?.confirmDiscard(action) ?? Promise.resolve("cancel" as const);
+export const onDesktopCloseRequested = (callback: () => void) => bridge()?.onCloseRequested(callback) ?? (() => undefined);
+export const approveDesktopClose = () => bridge()?.approveClose();
+export const cancelDesktopClose = () => bridge()?.cancelClose();

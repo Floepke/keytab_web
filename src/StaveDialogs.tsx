@@ -66,6 +66,24 @@ export function TimeSignatureDialog({ numerator, denominator, indicatorEnabled, 
   </Dialog>;
 }
 
+export function TempoDialog({ tempo, durationTicks, xOffsetMm, visible, onApply, onClose }: { tempo: number; durationTicks: number; xOffsetMm: number; visible: boolean; onApply: (tempo: number, durationTicks: number, xOffsetMm: number, visible: boolean) => void; onClose: () => void }) {
+  const [draftTempo, setDraftTempo] = useState(tempo);
+  const [draftDuration, setDraftDuration] = useState(durationTicks);
+  const [draftXOffset, setDraftXOffset] = useState(xOffsetMm);
+  const [isVisible, setIsVisible] = useState(visible);
+  const valid = Number.isInteger(draftTempo) && draftTempo >= 1 && draftTempo <= 1000
+    && Number.isInteger(draftDuration) && draftDuration >= 1 && Number.isFinite(draftXOffset);
+  return <Dialog title="Tempo" onClose={onClose}>
+    <div className="stave-dialog-body">
+      <label className="stave-value-field"><span>Quarter notes per minute</span><input autoFocus type="number" min={1} max={1000} step={1} value={draftTempo} onChange={(event) => setDraftTempo(Number(event.target.value))} /></label>
+      <label className="stave-value-field"><span>Duration ticks</span><input type="number" min={1} step={1} value={draftDuration} onChange={(event) => setDraftDuration(Number(event.target.value))} /></label>
+      <label className="stave-value-field"><span>Horizontal offset (mm)</span><input type="number" step={0.1} value={draftXOffset} onChange={(event) => setDraftXOffset(Number(event.target.value))} /></label>
+      <label className="dialog-checkbox"><input type="checkbox" checked={isVisible} onChange={(event) => setIsVisible(event.target.checked)} />Show tempo marking</label>
+    </div>
+    <footer><button type="button" onClick={onClose}>Cancel</button><button type="button" className="primary" disabled={!valid} onClick={() => onApply(draftTempo, draftDuration, draftXOffset, isVisible)}>Apply</button></footer>
+  </Dialog>;
+}
+
 export function StaveRangeDialog({ range, onApply, onClose }: { range: [number, number]; onApply: (range: [number, number]) => void; onClose: () => void }) {
   const [low, setLow] = useState(range[0]);
   const [high, setHigh] = useState(range[1]);

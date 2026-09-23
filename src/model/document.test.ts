@@ -32,6 +32,14 @@ describe("keyTAB document model", () => {
     expect(restored.pages[0].systems[0].staves[0].events[0]).toMatchObject({ type: "note", time: 256, pitch: 60 });
   });
 
+  it("restores the required initial tempo marker when loading a score without one", () => {
+    const serialized = JSON.parse(serializeDocument(createDocument()));
+    serialized.timeline_events = [];
+    const restored = deserializeDocument(serialized);
+    expect(restored.timeline_events).toHaveLength(1);
+    expect(restored.timeline_events[0]).toMatchObject({ type: "tempo", start_tick: 0, tempo: 120 });
+  });
+
   it("uses enabled beat markers for visible grid lines", () => {
     expect(gridBoundaries([{ numerator: 7, denominator: 8, beat_grouping: [1, 4, 9], measure_amount: 2, indicator_enabled: true }], 256)).toEqual({ measures: [0, 896, 1792], groups: [384, 1280] });
   });
@@ -112,6 +120,17 @@ describe("keyTAB document model", () => {
     expect(document.base_grid.at(-1)!.measure_amount).toBe(7);
     removeMeasure(document);
     expect(document.base_grid.at(-1)!.measure_amount).toBe(6);
+  });
+
+  it("extends the final grid instead of discarding notes after a time-signature change", () => {
+    const document = createDocument();
+    document.pages[0].systems[0].staves[0].events.push({ id: "imported-note", type: "note", time: 7800, duration: 256, pitch: 60, velocity: 64, hand: "left", notehead: "auto", color: "auto", acc: 0, continuation_id: null, continues_from_previous: false, continues_to_next: false });
+
+    setTimeSignature(document, 2048, 3, 4, false);
+
+    const events = document.pages.flatMap((page) => page.systems).flatMap((system) => system.staves[0].events);
+    expect(events.find((event) => event.id === "imported-note")).toMatchObject({ time: 7800, duration: 256 });
+    expect(document.pages.at(-1)!.systems.at(-1)!.end_tick).toBeGreaterThanOrEqual(8056);
   });
 
   it("edits grid lines only in a time-signature change measure", () => {

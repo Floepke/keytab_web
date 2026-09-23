@@ -4,6 +4,8 @@ const path = require("node:path");
 
 const SCORE_FILTERS = [{ name: "keyTAB score", extensions: ["ktw"] }];
 let mainWindow = null;
+let closeApproved = false;
+let closeRequestPending = false;
 const lastOpenedPath = () => path.join(app.getPath("userData"), "last-opened.json");
 const isScorePath = (filePath) => path.extname(filePath).toLowerCase() === ".ktw";
 const scoreName = (filePath) => path.basename(filePath);
@@ -54,6 +56,18 @@ ipcMain.handle("score:confirm-discard", async (_event, action) => {
   return ["save", "discard", "cancel"][result.response];
 });
 
+ipcMain.on("app:approve-close", (event) => {
+  const window = BrowserWindow.fromWebContents(event.sender);
+  if (!window) return;
+  closeApproved = true;
+  closeRequestPending = false;
+  window.close();
+});
+
+ipcMain.on("app:cancel-close", () => {
+  closeRequestPending = false;
+});
+
 const createWindow = () => {
   const icon = path.join(app.getAppPath(), "src", "assets", "icons", "keyTAB.png");
   const rendererPath = path.join(__dirname, "..", "dist", "index.html");
@@ -77,8 +91,17 @@ const createWindow = () => {
     mainWindow?.show();
     mainWindow?.focus();
   });
+  mainWindow.on("close", (event) => {
+    if (closeApproved) return;
+    event.preventDefault();
+    if (closeRequestPending) return;
+    closeRequestPending = true;
+    mainWindow?.webContents.send("app:close-requested");
+  });
   mainWindow.on("closed", () => {
     mainWindow = null;
+    closeApproved = false;
+    closeRequestPending = false;
   });
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith("https:")) void shell.openExternal(url);
