@@ -615,8 +615,9 @@ function SystemPreview({
     const stop = !note.continues_to_next && !nextSameHand ? [[x - midiHalfWidth, end - height], [x, end], [x + midiHalfWidth, end - height]] : null;
     const dotTicks = [...new Set([...measures, ...notes.filter((candidate) => candidate.hand === note.hand).flatMap((candidate) => [candidate.time, candidate.time + candidate.duration])])]
       .filter((tick) => note.time < tick && tick < note.time + note.duration);
-    return { note, x, start, end, stemTipX, headPath, body, filled, form, headUp, stop, dots: dotTicks.map((tick) => [x, yAt(tick) + mmToPixels(semitoneMm)] as const) };
+    return { note, x, start, end, stemTipX, headPath, body, filled, form, headUp, isBlackKey: isBlack, stop, dots: dotTicks.map((tick) => [x, yAt(tick) + mmToPixels(semitoneMm)] as const) };
   });
+  const noteGeometriesInPaintOrder = [...noteGeometries].sort((first, second) => Number(first.isBlackKey) - Number(second.isBlackKey));
   const previewGeometry = inputPreview && (activeTool === "left" || activeTool === "right") ? (() => {
     const { time: previewTime, pitch } = inputPreview;
     const x = xAtPitch(pitch);
@@ -895,7 +896,7 @@ function SystemPreview({
       </g>;
     }) : null,
     midi_body: document.layout.note_midinote_visible ? <>
-      {noteGeometries.map((geometry) => {
+      {noteGeometriesInPaintOrder.map((geometry) => {
         const bodyPath = `M ${geometry.body.map(([pointX, pointY]) => `${pointX} ${pointY}`).join(" L ")} Z`;
         const bodyColor = selectedNoteIds.has(geometry.note.id) ? "var(--accent)" : geometry.note.color === "auto" ? (geometry.note.hand === "left" ? document.layout.note_midinote_left_color : document.layout.note_midinote_right_color) : geometry.note.color;
         return <path key={geometry.note.id} d={bodyPath} fill={bodyColor} />;
