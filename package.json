@@ -1,0 +1,89 @@
+{
+  "name": "keytab-web",
+  "description": "keyTAB music notation editor",
+  "private": true,
+  "version": "0.1.0",
+  "author": "keyTAB contributors <maintainers@keytab.invalid>",
+  "homepage": "https://keytab.invalid",
+  "desktopName": "keytab",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "electron": "node scripts/run-electron.mjs",
+    "dist": "npm run build && electron-builder",
+    "dist:all": "node scripts/build-all-desktop.mjs",
+    "dist:win": "npm run build && electron-builder --win portable nsis",
+    "dist:linux": "npm run build && electron-builder --linux AppImage deb",
+    "dist:mac": "npm run build && electron-builder --mac dmg zip",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "jspdf": "^4.2.1",
+    "lucide-react": "latest",
+    "midi-file": "^1.2.4",
+    "react-dom": "latest",
+    "svg2pdf.js": "^2.8.1",
+    "tone": "^15.1.22",
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "electron": "^40.0.0",
+    "electron-builder": "^26.0.0",
+    "typescript": "latest",
+    "vite": "latest",
+    "vitest": "latest"
+  },
+  "build": {
+    "appId": "org.keytab.keytab",
+    "productName": "keyTAB",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "src/assets/icons/keyTAB.png",
+      "package.json"
+    ],
+    "asar": true,
+    "icon": "src/assets/icons/keyTAB.png",
+    "fileAssociations": [
+      {
+        "ext": "ktw",
+        "name": "keyTAB score",
+        "description": "keyTAB score",
+        "mimeType": "application/x-keytab-web"
+      }
+    ],
+    "win": {
+      "target": [
+        "portable",
+        "nsis"
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "AudioVideo",
+      "maintainer": "keyTAB contributors <maintainers@keytab.invalid>",
+      "syncDesktopName": true,
+      "synopsis": "keyTAB music notation editor"
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.music"
+    }
+  }
+}
