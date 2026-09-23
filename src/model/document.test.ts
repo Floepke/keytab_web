@@ -18,11 +18,23 @@ import {
 import { applyBeamOverrides, beamWindows, gridBoundaries, gridLineBoundaries, timeSignatureIndicators } from "./grid";
 
 describe("keyTAB document model", () => {
-  it("creates the keyTAB2 default page, system, stave, and grid", () => {
+  it("creates the keyTAB web default template", () => {
     const document = createDocument();
-    expect(document.pages).toHaveLength(1);
-    expect(document.pages[0].systems[0].staves).toHaveLength(1);
-    expect(document.pages[0].systems[0].end_tick).toBe(8192);
+    const systems = document.pages.flatMap((page) => page.systems);
+    expect(systems).toHaveLength(4);
+    expect(systems.every((system) => system.staves.length === 1)).toBe(true);
+    expect(document.base_grid).toMatchObject([{ numerator: 4, denominator: 4, measure_amount: 16 }]);
+    expect(systems.map(({ start_tick, end_tick }) => [start_tick, end_tick])).toEqual([
+      [0, 4096],
+      [4096, 8192],
+      [8192, 12288],
+      [12288, 16384],
+    ]);
+    expect(document.score_info).toEqual({
+      title: "Untitled",
+      composer: "keyTAB_web",
+      copyright: `\u00A9 keyTAB_web ${new Date().getFullYear()}`,
+    });
   });
 
   it("round-trips serialized native document data", () => {
@@ -86,28 +98,28 @@ describe("keyTAB document model", () => {
   it("splits systems and creates linked note continuations", () => {
     const document = createDocument();
     const system = document.pages[0].systems[0];
-    system.staves[0].events.push({ id: "crossing", type: "note", time: 4000, duration: 256, pitch: 60, velocity: 64, hand: "left", notehead: "auto", color: "auto", acc: 0, continuation_id: null, continues_from_previous: false, continues_to_next: false });
+    system.staves[0].events.push({ id: "crossing", type: "note", time: 2000, duration: 256, pitch: 60, velocity: 64, hand: "left", notehead: "auto", color: "auto", acc: 0, continuation_id: null, continues_from_previous: false, continues_to_next: false });
 
-    const following = splitSystemAt(document, system.id, 4096);
+    const following = splitSystemAt(document, system.id, 2048);
     const leadingNote = system.staves[0].events[0];
     const followingNote = following.staves[0].events[0];
     if (leadingNote.type !== "note" || followingNote.type !== "note") {
       throw new Error("Expected split notes to remain note events");
     }
 
-    expect([leadingNote.time, leadingNote.duration]).toEqual([4000, 96]);
-    expect([followingNote.type, followingNote.time, followingNote.duration]).toEqual(["note", 4096, 160]);
+    expect([leadingNote.time, leadingNote.duration]).toEqual([2000, 48]);
+    expect([followingNote.type, followingNote.time, followingNote.duration]).toEqual(["note", 2048, 208]);
     expect(leadingNote).toMatchObject({ continues_to_next: true, continuation_id: "crossing" });
     expect(followingNote).toMatchObject({ continues_from_previous: true, continuation_id: "crossing" });
-    expect(following.first_measure_number).toBe(5);
+    expect(following.first_measure_number).toBe(3);
   });
 
   it("gives every segment of a cross-system note one continuation identity", () => {
     const document = createDocument();
     const system = document.pages[0].systems[0];
-    system.staves[0].events.push({ id: "crossing", type: "note", time: 4000, duration: 256, pitch: 60, velocity: 64, hand: "left", notehead: "auto", color: "auto", acc: 0, continuation_id: null, continues_from_previous: false, continues_to_next: false });
+    system.staves[0].events.push({ id: "crossing", type: "note", time: 2000, duration: 256, pitch: 60, velocity: 64, hand: "left", notehead: "auto", color: "auto", acc: 0, continuation_id: null, continues_from_previous: false, continues_to_next: false });
 
-    const following = splitSystemAt(document, system.id, 4096);
+    const following = splitSystemAt(document, system.id, 2048);
     const segments = [system, following].flatMap((candidate) => candidate.staves[0].events)
       .filter((event): event is Extract<typeof event, { type: "note" }> => event.type === "note");
     const continuationId = segments[0].continuation_id ?? segments[0].id;
@@ -120,14 +132,14 @@ describe("keyTAB document model", () => {
     setTimeSignature(document, 2048, 3, 4, false);
     expect(document.base_grid.map(({ numerator, denominator, measure_amount, indicator_enabled }) => ({ numerator, denominator, measure_amount, indicator_enabled }))).toEqual([
       { numerator: 4, denominator: 4, measure_amount: 2, indicator_enabled: true },
-      { numerator: 3, denominator: 4, measure_amount: 6, indicator_enabled: false },
+      { numerator: 3, denominator: 4, measure_amount: 14, indicator_enabled: false },
     ]);
-    expect(document.pages.at(-1)!.systems.at(-1)!.end_tick).toBe(6656);
+    expect(document.pages.at(-1)!.systems.at(-1)!.end_tick).toBe(12800);
 
     addMeasure(document);
-    expect(document.base_grid.at(-1)!.measure_amount).toBe(7);
+    expect(document.base_grid.at(-1)!.measure_amount).toBe(15);
     removeMeasure(document);
-    expect(document.base_grid.at(-1)!.measure_amount).toBe(6);
+    expect(document.base_grid.at(-1)!.measure_amount).toBe(14);
   });
 
   it("extends the final grid instead of discarding notes after a time-signature change", () => {
@@ -159,8 +171,8 @@ describe("keyTAB document model", () => {
 
     splitSystemAt(document, system.id, 1024);
 
-    expect(document.pages).toHaveLength(2);
-    expect(document.pages.map((page) => page.systems[0].start_tick)).toEqual([0, 1024]);
+    expect(document.pages).toHaveLength(5);
+    expect(document.pages.map((page) => page.systems[0].start_tick)).toEqual([0, 1024, 4096, 8192, 12288]);
   });
 
   it("supports forced page breaks and merging systems again", () => {
@@ -169,12 +181,12 @@ describe("keyTAB document model", () => {
     const following = splitSystemAt(document, first.id, 1024);
 
     setForcedPageBreakBefore(document, following.id, true);
-    expect(document.pages.map((page) => page.systems)).toHaveLength(2);
+    expect(document.pages.map((page) => page.systems)).toHaveLength(3);
     expect(document.pages[1].systems[0].force_page_break_before).toBe(true);
 
     const merged = removeSystemBreak(document, following.id, "top");
-    expect(document.pages).toHaveLength(1);
-    expect(document.pages[0].systems).toEqual([merged]);
-    expect([merged.start_tick, merged.end_tick]).toEqual([0, 8192]);
+    expect(document.pages).toHaveLength(2);
+    expect(document.pages[0].systems[0]).toEqual(merged);
+    expect([merged.start_tick, merged.end_tick]).toEqual([0, 4096]);
   });
 });

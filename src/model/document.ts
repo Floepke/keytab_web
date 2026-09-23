@@ -173,7 +173,8 @@ export function createLayout(): Layout {
 
 export function createDocument(): KeyTabDocument {
   const layout = createLayout();
-  const baseGrid = createBaseGrid();
+  const baseGrid = { ...createBaseGrid(), measure_amount: 16 };
+  const currentYear = new Date().getFullYear();
   const system: System = {
     id: newId(),
     start_tick: 0,
@@ -204,7 +205,7 @@ export function createDocument(): KeyTabDocument {
     format: FORMAT_NAME,
     format_version: FORMAT_VERSION,
     time_per_quarter: TIME_PER_QUARTER,
-    score_info: { title: "Untitled", composer: "", copyright: "" },
+    score_info: { title: "Untitled", composer: "keyTAB_web", copyright: `\u00A9 keyTAB_web ${currentYear}` },
     layout,
     base_grid: [baseGrid],
     timeline_events: [createEvent("tempo") as TempoEvent],
@@ -212,7 +213,11 @@ export function createDocument(): KeyTabDocument {
     created_at: new Date().toISOString(),
     modified_at: new Date().toISOString(),
   };
-  reflowPages(document);
+  const measureTicks = measureDuration(baseGrid, TIME_PER_QUARTER);
+  let currentSystem = system;
+  for (const measure of [4, 8, 12]) {
+    currentSystem = splitSystemAt(document, currentSystem.id, measure * measureTicks);
+  }
   return document;
 }
 
