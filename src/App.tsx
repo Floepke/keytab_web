@@ -12,6 +12,7 @@ import {
   Undo2,
 } from "lucide-react";
 import arpeggioIcon from "./assets/icons/arpeggio.png";
+import countLineIcon from "./assets/icons/count_line.png";
 import lineBreakIcon from "./assets/icons/line_break.png";
 import leftNoteIcon from "./assets/icons/note_left.png";
 import rightNoteIcon from "./assets/icons/note_right.png";
@@ -19,13 +20,14 @@ import tempoIcon from "./assets/icons/tempo.png";
 import timeSignatureIcon from "./assets/icons/time_signature.png";
 import { ScoreInfoDialog } from "./ScoreInfoDialog";
 import { StyleDialog } from "./StyleDialog";
+import { ManualDialog } from "./ManualDialog";
 import { StaveRangeDialog, StavesDialog, StaveValueDialog, TempoDialog, TimeSignatureDialog, type StaveConfiguration, type StaveSetting } from "./StaveDialogs";
 import { MidiImportDialog } from "./MidiImportDialog";
 import { exportScorePdf } from "./pdfExport";
 import { playNoteAudition, startPlayback, type PlaybackSession } from "./playback";
 import { approveDesktopClose, cancelDesktopClose, confirmDesktopDiscard, isDesktopApp, loadLastOpenedDesktopScore, onDesktopCloseRequested, openDesktopScore, saveDesktopScore } from "./desktop";
-import { chooseSaveLocation, chooseScoreFile, clearLastFileHandle, hasFileSystemAccess, loadLastFileHandle, loadSessionSnapshot, saveLastFileHandle, saveSessionSnapshot, type StoredFileHandle } from "./sessionStore";
-import { addMeasure, createDocument, deserializeDocument, ensureInitialTempo, removeMeasure, removeSystemBreak, repaginateDocument, serializeDocument, setForcedPageBreakBefore, setTimeSignature, setTimeSignatureGridLine, splitSystemAt } from "./model/document";
+import { chooseSaveLocation, chooseScoreFile, clearLastFileHandle, hasFileSystemAccess, loadDefaultLayoutTemplate, loadLastFileHandle, loadSessionSnapshot, resetDefaultLayoutTemplate, saveDefaultLayoutTemplate, saveLastFileHandle, saveSessionSnapshot, type StoredFileHandle } from "./sessionStore";
+import { addMeasure, createDocument, deserializeDocument, ensureInitialTempo, ensureScoreDuration, removeMeasure, removeSystemBreak, repaginateDocument, serializeDocument, setForcedPageBreakBefore, setTimeSignature, setTimeSignatureGridLine, splitSystemAt } from "./model/document";
 import { createEvent, newId } from "./model/events";
 import { resolveWebSafeFontFamily } from "./model/fonts";
 import { importMidi, parseMidiFile, type MidiHand, type ParsedMidiFile } from "./midiImport";
@@ -42,7 +44,7 @@ import {
   staveLineStyle,
   staveSemitoneMm,
 } from "./model/stave";
-import type { KeyTabDocument, NoteEvent, Stave, System, TempoEvent } from "./model/types";
+import type { CountLineEvent, KeyTabDocument, NoteEvent, Stave, System, TempoEvent } from "./model/types";
 
 const SNAP_BASES = [1, 2, 4, 8, 16, 32, 64, 128];
 const PIXELS_PER_MM = 3;
@@ -100,6 +102,7 @@ const SVG_DRAW_LAYERS = [
   "time_signature",
   "measure_numbers",
   "tempo",
+  "count_lines",
   "notes",
   "beams",
   "editor_controls",
@@ -113,7 +116,7 @@ const SVG_DRAW_LAYERS = [
 
 type SvgDrawLayer = typeof SVG_DRAW_LAYERS[number];
 
-type Tool = "left" | "right" | "arpeggio" | "break" | "meter" | "tempo" | "slur-left" | "slur-right";
+type Tool = "left" | "right" | "arpeggio" | "break" | "meter" | "tempo" | "count_line" | "slur-left" | "slur-right";
 type SystemBreakTarget =
   | { kind: "split"; time: number }
   | { kind: "remove"; boundary: "top" | "bottom" };
@@ -259,6 +262,7 @@ function SystemPreview({
     noteId: string;
     pointerId: number;
   } | null>(null);
+  const countLineDragRef = useRef<{ id: string; part: "start" | "end" | "line"; pointerId: number; startTime: number; startPointerTime: number; startRpitch1: number; startRpitch2: number; startRpitch: number } | null>(null);
   const selectionDragRef = useRef<{ pointerId: number; startX: number; startY: number; startClientX: number; startClientY: number; rightButton: boolean } | null>(null);
   const suppressContextMenuRef = useRef(false);
   const [inputPreview, setInputPreview] = useState<{ time: number; pitch: number } | null>(null);
@@ -402,7 +406,7 @@ function SystemPreview({
   };
 
   const startSelectionDrag = (event: PointerEvent<SVGElement>) => {
-    if (!event.shiftKey && event.button !== 2) return false;
+    if (!event.shiftKey && (event.button !== 2 || activeTool === "count_line")) return false;
     const point = pointAt(event);
     const startX = mmToPixels(point.xMm);
     const startY = mmToPixels(point.yMm);
@@ -542,7 +546,7 @@ function SystemPreview({
   }, [activeTool, onEdit, system.id, systemBreakTarget]);
 
   const startNoteDrag = (event: PointerEvent<SVGElement>) => {
-    if (activeTool !== "left" && activeTool !== "right") return;
+    if ((activeTool !== "left" && activeTool !== "right") || event.button !== 0) return;
     if (selectedNoteIds.size) {
       onClearSelection();
       return;
@@ -718,6 +722,85 @@ function SystemPreview({
     return { note, x, start, end, stemTipX, headPath, body, filled, form, headUp, headHalfWidth: halfWidth, isBlackKey: isBlack, stop, dots: dotTicks.map((tick) => [x, yAt(tick) + mmToPixels(semitoneMm)] as const) };
   });
   const noteGeometriesInPaintOrder = [...noteGeometries].sort((first, second) => Number(first.isBlackKey) - Number(second.isBlackKey));
+  const countLines = stave.events.filter((event): event is CountLineEvent => event.type === "count_line");
+  const countLineRpitchAt = (xMm: number) => Math.round((xMm - pitchToXmm(60, stave, staveLeftMm, document.layout)) / semitoneMm);
+  const countLineTargetAt = (xMm: number, yMm: number): { line: CountLineEvent; part: "start" | "end" | "line" } | null => {
+    if (activeTool !== "count_line") return null;
+    const x = mmToPixels(xMm);
+    const y = mmToPixels(yMm);
+    const centralCX = xAtPitch(60);
+    const tolerance = Math.max(mmToPixels(semitoneMm) * 0.7, 6);
+    for (const line of [...countLines].reverse()) {
+      if (line.start_tick < system.start_tick || line.start_tick >= system.end_tick) continue;
+      const lineY = yAt(line.start_tick);
+      const startX = centralCX + line.rpitch1 * mmToPixels(semitoneMm);
+      const endX = centralCX + line.rpitch2 * mmToPixels(semitoneMm);
+      if (Math.abs(x - startX) <= tolerance && Math.abs(y - lineY) <= tolerance) return { line, part: "start" };
+      if (Math.abs(x - endX) <= tolerance && Math.abs(y - lineY) <= tolerance) return { line, part: "end" };
+      if (Math.abs(y - lineY) <= tolerance / 2 && x >= Math.min(startX, endX) && x <= Math.max(startX, endX)) return { line, part: "line" };
+    }
+    return null;
+  };
+  const startCountLineDrag = (event: PointerEvent<SVGElement>) => {
+    if (activeTool !== "count_line" || event.button !== 0) return false;
+    const { xMm, yMm } = pointAt(event);
+    if (yMm < system.top_mm || yMm > system.top_mm + system.height_mm) return false;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const target = countLineTargetAt(xMm, yMm);
+    if (target) {
+      countLineDragRef.current = { id: target.line.id, part: target.part, pointerId: event.pointerId, startTime: target.line.start_tick, startPointerTime: snapTimeAt(yMm), startRpitch1: target.line.rpitch1, startRpitch2: target.line.rpitch2, startRpitch: countLineRpitchAt(xMm) };
+      return true;
+    }
+    const line = createEvent("count_line") as CountLineEvent;
+    const rpitch = countLineRpitchAt(xMm);
+    line.start_tick = snapTimeAt(yMm);
+    line.rpitch1 = rpitch;
+    line.rpitch2 = rpitch;
+    countLineDragRef.current = { id: line.id, part: "end", pointerId: event.pointerId, startTime: line.start_tick, startPointerTime: line.start_tick, startRpitch1: rpitch, startRpitch2: rpitch, startRpitch: rpitch };
+    onEdit((editableDocument) => { locateStave(editableDocument)?.[1].events.push(line); }, "Count line added");
+    return true;
+  };
+  const updateCountLineDrag = (event: PointerEvent<SVGElement>) => {
+    const drag = countLineDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return false;
+    const { xMm, yMm } = pointAt(event);
+    const rpitch = countLineRpitchAt(xMm);
+    onEdit((editableDocument) => {
+      const line = locateStave(editableDocument)?.[1].events.find((candidate): candidate is CountLineEvent => candidate.type === "count_line" && candidate.id === drag.id);
+      if (!line) return;
+      if (drag.part === "line") {
+        const delta = rpitch - drag.startRpitch;
+        line.start_tick = Math.max(system.start_tick, Math.min(system.end_tick - snapTicks, drag.startTime + snapTimeAt(yMm) - drag.startPointerTime));
+        line.rpitch1 = drag.startRpitch1 + delta;
+        line.rpitch2 = drag.startRpitch2 + delta;
+      } else {
+        line.start_tick = snapTimeAt(yMm);
+        if (drag.part === "start") line.rpitch1 = line.rpitch1 <= line.rpitch2 ? Math.min(rpitch, line.rpitch2 - 2) : Math.max(rpitch, line.rpitch2 + 2);
+        else if (line.rpitch2 === line.rpitch1) line.rpitch2 = rpitch >= line.rpitch1 ? line.rpitch1 + 2 : line.rpitch1 - 2;
+        else line.rpitch2 = line.rpitch2 >= line.rpitch1 ? Math.max(rpitch, line.rpitch1 + 2) : Math.min(rpitch, line.rpitch1 - 2);
+      }
+    }, "Count line updated");
+    return true;
+  };
+  const endCountLineDrag = (event: PointerEvent<SVGElement>) => {
+    if (countLineDragRef.current?.pointerId !== event.pointerId) return false;
+    countLineDragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    return true;
+  };
+  const removeCountLineAt = (event: MouseEvent<SVGElement>) => {
+    if (activeTool !== "count_line") return false;
+    const { xMm, yMm } = pointAt(event);
+    const target = countLineTargetAt(xMm, yMm);
+    if (!target || target.part === "line") return false;
+    onEdit((editableDocument) => {
+      const editableStave = locateStave(editableDocument)?.[1];
+      if (!editableStave) return;
+      editableStave.events = editableStave.events.filter((candidate) => candidate.id !== target.line.id);
+    }, "Count line removed");
+    return true;
+  };
   const previewGeometry = inputPreview && (activeTool === "left" || activeTool === "right") ? (() => {
     const { time: previewTime, pitch } = inputPreview;
     const x = xAtPitch(pitch);
@@ -840,12 +923,25 @@ function SystemPreview({
     if (cursor < right) segments.push(<line key="after" x1={cursor} x2={right} y1={y} y2={y} className={className} stroke={stroke} strokeWidth={strokeWidth} strokeDasharray={strokeDasharray} />);
     return segments;
   };
+  const dashPatternPixels = (values: readonly number[], patternScale = 1) => {
+    if (!values.length) return undefined;
+    const pattern = values.length === 1
+      ? values[0] === 0 ? [2, 2] : [values[0], values[0]]
+      : values.map((value, index) => value === 0 ? index % 2 === 0 ? 0.1 : 2 : value);
+    return pattern.map((value) => mmToPixels(value * patternScale)).join(" ");
+  };
   const fullStaveLine = (tick: number, bounds: [number, number], key: string, className: string, strokeWidth?: number) => <line key={key} x1={mmToPixels(bounds[0])} x2={mmToPixels(bounds[1])} y1={yAt(tick)} y2={yAt(tick)} className={className} strokeWidth={strokeWidth} />;
   const isFinalSystem = document.pages.at(-1)?.systems.at(-1)?.id === system.id;
   const indicatorScale = document.layout.scale * stave.scale;
   const indicatorLaneWidth = document.layout.time_signature_indicator_lane_width_mm * indicatorScale;
   const indicatorHalfSpan = 3 * indicatorScale;
   const indicatorFontPixels = (points: number) => mmToPixels(points * (25.4 / 72) * indicatorScale);
+  const beamRightAt = (tick: number) => {
+    const rightEdges = beamGeometries
+      .filter((beam) => time.ge(tick, beam.startTick) && time.le(tick, beam.endTick))
+      .flatMap((beam) => beam.polygon.map(([x]) => x));
+    return rightEdges.length ? Math.max(...rightEdges) : null;
+  };
   const measureNumberTicks = document.layout.measure_numbers_visible && document.layout.measure_numbering_placement !== "off"
     ? visibleMeasures.slice(0, -1).filter((_, index) => document.layout.measure_numbering_placement === "barline" || index === 0)
     : [];
@@ -857,7 +953,7 @@ function SystemPreview({
     const textTop = yAt(tick) + mmToPixels(document.layout.grid_barline_thickness_mm * indicatorScale * 0.5 + 1);
     const textBottom = textTop + fontSize;
     const notationRightBase = mmToPixels(rightmostStaveBound[1]);
-    let notationRight = notationRightBase;
+    let notationRight = Math.max(notationRightBase, beamRightAt(tick) ?? Number.NEGATIVE_INFINITY);
     for (let attempt = 0; attempt < 8; attempt += 1) {
       const labelLeft = notationRight + mmToPixels(6.5 * indicatorScale);
       const labelRight = labelLeft + numberWidth;
@@ -891,7 +987,11 @@ function SystemPreview({
   const tempoMarkerGeometry = (tempo: TempoEvent) => {
     const fontSize = document.layout.tempo_font.size_pt * 25.4 / 72 * PIXELS_PER_MM * document.layout.scale * stave.scale;
     const textWidth = Math.max(PIXELS_PER_MM, measureTextWidth(`${tempo.tempo}`, resolveWebSafeFontFamily(document.layout.tempo_font.family), fontSize, document.layout.tempo_font.bold, document.layout.tempo_font.italic));
-    const baseLeft = mmToPixels(rightmostStaveBound[1] + tempo.x_offset_mm);
+    const beamRight = beamRightAt(tempo.start_tick);
+    const baseLeft = Math.max(
+      mmToPixels(rightmostStaveBound[1] + tempo.x_offset_mm),
+      beamRight === null ? Number.NEGATIVE_INFINITY : beamRight + mmToPixels(indicatorScale),
+    );
     const measureNumberRight = measureNumberRightEdges.get(tempo.start_tick);
     const textLeft = measureNumberRight === undefined ? baseLeft : Math.max(baseLeft, measureNumberRight + mmToPixels(indicatorScale));
     const startY = yAt(tempo.start_tick);
@@ -945,7 +1045,13 @@ function SystemPreview({
       )) : [])}
     </g> : null,
     grid_lines: document.layout.grid_line_visible ? <>
-      {visibleGroups.flatMap((tick) => segmentedLine(tick, "grid-line", mmToPixels(document.layout.grid_gridline_thickness_mm * scale), undefined, document.layout.grid_gridline_dash_pattern_mm.map((value) => mmToPixels(value * scale)).join(" ")).map((line, index) => <g key={`group-${tick}-${index}`}>{line}</g>))}
+      {visibleGroups.flatMap((tick) => segmentedLine(tick, "grid-line", mmToPixels(document.layout.grid_gridline_thickness_mm * scale), undefined, dashPatternPixels(document.layout.grid_gridline_dash_pattern_mm, scale)).map((line, index) => <g key={`group-${tick}-${index}`}>{line}</g>))}
+      {system.staves.slice(1).flatMap((candidate, index) => {
+        const bounds = staveBounds[index + 1];
+        if (!bounds) return [];
+        const candidateScale = document.layout.scale * candidate.scale;
+        return visibleGroups.map((tick) => <line key={`stave-${index + 1}-grid-${tick}`} x1={mmToPixels(bounds[0])} x2={mmToPixels(bounds[1])} y1={yAt(tick)} y2={yAt(tick)} className="grid-line" strokeWidth={mmToPixels(document.layout.grid_gridline_thickness_mm * candidateScale)} strokeDasharray={dashPatternPixels(document.layout.grid_gridline_dash_pattern_mm, candidateScale)} />);
+      })}
     </> : null,
     barlines: document.layout.barline_visible ? <>
       {visibleMeasures.flatMap((tick) => segmentedLine(tick, "measure-line", mmToPixels(document.layout.grid_barline_thickness_mm * scale)).map((line, index) => <g key={`measure-${tick}-${index}`}>{line}</g>))}
@@ -969,10 +1075,10 @@ function SystemPreview({
     stave_lines: document.layout.stave_visible ? system.staves.flatMap((candidate, index) => naturalLinePitches(candidate).map((pitch) => {
       const style = staveLineStyle(pitch, document.layout, candidate);
       const x = mmToPixels(pitchToXmm(pitch, candidate, staveLeftPositions[index], document.layout));
-      return <line key={`${candidate.id}-${pitch}`} x1={x} x2={x} y1={mmToPixels(system.top_mm)} y2={mmToPixels(system.top_mm + system.height_mm)} className="stave-line" style={{ strokeWidth: mmToPixels(style.widthMm), strokeDasharray: style.dashMm.map(mmToPixels).join(" ") || undefined }} />;
+      return <line key={`${candidate.id}-${pitch}`} x1={x} x2={x} y1={mmToPixels(system.top_mm)} y2={mmToPixels(system.top_mm + system.height_mm)} className="stave-line" style={{ strokeWidth: mmToPixels(style.widthMm), strokeDasharray: dashPatternPixels(style.dashMm) }} />;
     })) : null,
     ledger_lines: document.layout.stave_visible ? ledgers.map((ledger) => (
-      <line key={`${ledger.pitch}-${ledger.startYmm}`} x1={mmToPixels(ledger.xMm)} x2={mmToPixels(ledger.xMm)} y1={mmToPixels(ledger.startYmm)} y2={mmToPixels(ledger.endYmm)} className={ledger.midiOnly ? "stave-line ledger-line midi-ledger" : "stave-line ledger-line"} style={{ strokeWidth: mmToPixels(ledger.widthMm), strokeDasharray: ledger.dashMm.map(mmToPixels).join(" ") || undefined }} />
+      <line key={`${ledger.pitch}-${ledger.startYmm}`} x1={mmToPixels(ledger.xMm)} x2={mmToPixels(ledger.xMm)} y1={mmToPixels(ledger.startYmm)} y2={mmToPixels(ledger.endYmm)} className={ledger.midiOnly ? "stave-line ledger-line midi-ledger" : "stave-line ledger-line"} style={{ strokeWidth: mmToPixels(ledger.widthMm), strokeDasharray: dashPatternPixels(ledger.dashMm) }} />
     )) : null,
     time_signature: document.layout.time_signature_visible ? timeSignatures.flatMap(({ grid, startTick }) => {
       const measureEndTick = Math.min(system.end_tick, startTick + grid.numerator * document.time_per_quarter * 4 / grid.denominator);
@@ -1018,7 +1124,7 @@ function SystemPreview({
     measure_numbers: measureNumberTicks.map((tick, index) => {
       const { measureFont, fontSize, numberText, textTop, numberX, numberRight } = measureNumberGeometry(tick, index);
       return <g key={`number-${tick}`}>
-        {document.layout.measure_numbering_guide_visible && <line className="measure-numbering-guide" x1={mmToPixels(rightmostStaveBound[1])} x2={numberRight} y1={yAt(tick)} y2={yAt(tick)} style={{ stroke: "var(--notation-color)", strokeWidth: mmToPixels(document.layout.measure_numbering_guide_thickness_mm * indicatorScale), strokeDasharray: document.layout.measure_numbering_guide_dash_pattern_mm.map((value) => mmToPixels(value * indicatorScale)).join(" ") || undefined }} />}
+        {document.layout.measure_numbering_guide_visible && <line className="measure-numbering-guide" x1={mmToPixels(rightmostStaveBound[1])} x2={numberRight} y1={yAt(tick)} y2={yAt(tick)} style={{ stroke: "var(--notation-color)", strokeWidth: mmToPixels(document.layout.measure_numbering_guide_thickness_mm * indicatorScale), strokeDasharray: dashPatternPixels(document.layout.measure_numbering_guide_dash_pattern_mm, indicatorScale) }} />}
         <text x={numberX} y={textTop} className="measure-number" dominantBaseline="hanging" style={{ fontFamily: resolveWebSafeFontFamily(measureFont.family), fontSize, fontWeight: measureFont.bold ? 700 : 400, fontStyle: measureFont.italic ? "italic" : "normal" }}>{numberText}</text>
       </g>;
     }),
@@ -1032,6 +1138,14 @@ function SystemPreview({
           <text x={marker.textLeft} y={(marker.startY + marker.endY) / 2} dominantBaseline="middle" style={{ fontFamily: resolveWebSafeFontFamily(font.family), fontSize: marker.fontSize, fontWeight: font.bold ? 700 : 400, fontStyle: font.italic ? "italic" : "normal", textDecoration: font.underline ? "underline" : "none" }}>{tempo.tempo}</text>
         </g>;
       }) : null,
+    count_lines: document.layout.countline_visible ? stave.events.filter((event): event is CountLineEvent => event.type === "count_line" && event.start_tick >= system.start_tick && event.start_tick < system.end_tick).map((line) => {
+      const centralCX = xAtPitch(60);
+      const startX = centralCX + line.rpitch1 * mmToPixels(semitoneMm);
+      const endX = centralCX + line.rpitch2 * mmToPixels(semitoneMm);
+      const y = yAt(line.start_tick);
+      const handleSize = Math.max(mmToPixels(semitoneMm), 6) * 1.4;
+      return <g key={line.id} className="count-line"><line x1={Math.min(startX, endX)} x2={Math.max(startX, endX)} y1={y} y2={y} stroke="var(--notation-color)" strokeWidth={mmToPixels(document.layout.countline_thickness_mm * scale)} strokeDasharray={dashPatternPixels(document.layout.countline_dash_pattern, scale)} />{activeTool === "count_line" && <><rect fill="var(--accent)" x={startX - handleSize / 2} y={y - handleSize / 2} width={handleSize} height={handleSize} /><rect fill="var(--accent)" x={endX - handleSize / 2} y={y - handleSize / 2} width={handleSize} height={handleSize} /></>}</g>;
+    }) : null,
     midi_body: document.layout.note_midinote_visible ? <>
       {noteGeometriesInPaintOrder.map((geometry) => {
         const bodyPath = `M ${geometry.body.map(([pointX, pointY]) => `${pointX} ${pointY}`).join(" L ")} Z`;
@@ -1110,16 +1224,20 @@ function SystemPreview({
   return (
     <g
       onClick={(event) => { if (selectedNoteIds.size) onClearSelection(); else { editSystemBreak(event); editTimeSignature(event); editTempo(event); } }}
-      onPointerDown={(event) => { if (!startSelectionDrag(event)) startNoteDrag(event); }}
+      onPointerDown={(event) => { if (!startSelectionDrag(event) && !startCountLineDrag(event)) startNoteDrag(event); }}
       onPointerOver={(event) => { updateSystemBreakHover(event); updateMeterHover(event); updateStaveControlHover(event); updatePasteTarget(event); }}
-      onPointerMove={(event) => { updateSystemBreakHover(event); updateMeterHover(event); updateStaveControlHover(event); updatePasteTarget(event); if (!updateSelectionDrag(event)) updateNoteDrag(event); }}
-      onPointerUp={(event) => { if (!endSelectionDrag(event)) endNoteDrag(event); }}
-      onPointerCancel={(event) => { if (!endSelectionDrag(event)) endNoteDrag(event); }}
+      onPointerMove={(event) => { updateSystemBreakHover(event); updateMeterHover(event); updateStaveControlHover(event); updatePasteTarget(event); if (!updateSelectionDrag(event) && !updateCountLineDrag(event)) updateNoteDrag(event); }}
+      onPointerUp={(event) => { if (!endSelectionDrag(event) && !endCountLineDrag(event)) endNoteDrag(event); }}
+      onPointerCancel={(event) => { if (!endSelectionDrag(event) && !endCountLineDrag(event)) endNoteDrag(event); }}
       onPointerLeave={() => { clearInputPreview(); clearSystemBreakHover(); setMeterTarget(null); setHoveredStaveControlId(null); }}
       onContextMenu={(event) => {
         if (suppressContextMenuRef.current) {
           suppressContextMenuRef.current = false;
           event.preventDefault();
+          return;
+        }
+        if (activeTool === "count_line") {
+          if (removeCountLineAt(event)) event.preventDefault();
           return;
         }
         if (selectedNoteIds.size) {
@@ -1168,6 +1286,78 @@ function PaperPreview({ document, pageIndex, activeTool, snapTicks, onEdit, onOp
   const composerX = (page.width_mm - document.layout.page_right_margin_mm) * PIXELS_PER_MM;
   const footerX = document.layout.page_left_margin_mm * PIXELS_PER_MM;
   const footerY = (page.height_mm - document.layout.page_bottom_margin_mm) * PIXELS_PER_MM;
+  const pageSelectionDragRef = useRef<{ pointerId: number; startX: number; startY: number; startClientX: number; startClientY: number; rightButton: boolean } | null>(null);
+  const suppressPageContextMenuRef = useRef(false);
+  const [pageSelectionRect, setPageSelectionRect] = useState<{ startX: number; startY: number; endX: number; endY: number } | null>(null);
+  const pageBoundsBySystemId = pageSystemBounds(page, document);
+  const pointOnPage = (event: PointerEvent<SVGSVGElement>) => {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    return {
+      x: (event.clientX - bounds.left) * paperWidth / bounds.width,
+      y: (event.clientY - bounds.top) * paperHeight / bounds.height,
+    };
+  };
+  const selectedNotesOnPage = (rect: { startX: number; startY: number; endX: number; endY: number }) => {
+    const left = Math.min(rect.startX, rect.endX);
+    const right = Math.max(rect.startX, rect.endX);
+    const top = Math.min(rect.startY, rect.endY);
+    const bottom = Math.max(rect.startY, rect.endY);
+    return page.systems.flatMap((system) => {
+      const systemBounds = pageBoundsBySystemId.get(system.id)!;
+      const staveLeftPositions = centeredStaveLeftPositions(system, document.layout, ...systemBounds);
+      return system.staves.flatMap((stave, staveIndex) => {
+        const semitoneMm = staveSemitoneMm(document.layout, stave);
+        const noteWidthMm = semitoneMm * document.layout.note_width_scaling;
+        const noteHeightMm = semitoneMm * 2 * document.layout.notehead_height_scaling;
+        const stemLengthMm = semitoneMm * document.layout.note_stem_length_semitone;
+        const notes = stave.events.filter((event): event is NoteEvent => event.type === "note");
+        return notes.filter((note) => {
+          const x = pitchToXmm(note.pitch, stave, staveLeftPositions[staveIndex], document.layout) * PIXELS_PER_MM;
+          const start = (system.top_mm + (note.time - system.start_tick) * system.height_mm / (system.end_tick - system.start_tick)) * PIXELS_PER_MM;
+          const end = (system.top_mm + (Math.min(system.end_tick, note.time + note.duration) - system.start_tick) * system.height_mm / (system.end_tick - system.start_tick)) * PIXELS_PER_MM;
+          const headHalfWidth = noteWidthMm * blackKeyWidthScale(note.pitch, note.time, notes, document.layout.black_note_rule) * PIXELS_PER_MM;
+          const stemTipX = x + (note.hand === "left" ? -1 : 1) * stemLengthMm * PIXELS_PER_MM;
+          const noteLeft = x - headHalfWidth;
+          const noteRight = Math.max(x + headHalfWidth, stemTipX);
+          const noteTop = start - noteHeightMm * PIXELS_PER_MM;
+          return noteRight >= left && noteLeft <= right && end >= top && noteTop <= bottom;
+        }).map((note) => note.id);
+      });
+    });
+  };
+  const startPageSelectionDrag = (event: PointerEvent<SVGSVGElement>) => {
+    if (!event.shiftKey && (event.button !== 2 || activeTool === "count_line")) return false;
+    const point = pointOnPage(event);
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.button === 2) suppressPageContextMenuRef.current = false;
+    pageSelectionDragRef.current = { pointerId: event.pointerId, startX: point.x, startY: point.y, startClientX: event.clientX, startClientY: event.clientY, rightButton: event.button === 2 };
+    setPageSelectionRect({ startX: point.x, startY: point.y, endX: point.x, endY: point.y });
+    return true;
+  };
+  const updatePageSelectionDrag = (event: PointerEvent<SVGSVGElement>) => {
+    const drag = pageSelectionDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return false;
+    const point = pointOnPage(event);
+    event.preventDefault();
+    event.stopPropagation();
+    setPageSelectionRect({ startX: drag.startX, startY: drag.startY, endX: point.x, endY: point.y });
+    return true;
+  };
+  const endPageSelectionDrag = (event: PointerEvent<SVGSVGElement>) => {
+    const drag = pageSelectionDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return false;
+    const point = pointOnPage(event);
+    const rect = { startX: drag.startX, startY: drag.startY, endX: point.x, endY: point.y };
+    pageSelectionDragRef.current = null;
+    event.preventDefault();
+    event.stopPropagation();
+    setPageSelectionRect(null);
+    const moved = Math.hypot(event.clientX - drag.startClientX, event.clientY - drag.startClientY);
+    if (!drag.rightButton || moved >= 3) onSelectionChange(selectedNotesOnPage(rect));
+    if (drag.rightButton && moved >= 3) suppressPageContextMenuRef.current = true;
+    return true;
+  };
   return (
     <svg
       className={`paper${exportOnly ? " export-paper" : ""}${activeTool === "left" || activeTool === "right" ? " is-note-input" : ""}${activeTool === "break" || activeTool === "meter" || activeTool === "tempo" ? " is-system-break" : ""}`}
@@ -1175,17 +1365,22 @@ function PaperPreview({ document, pageIndex, activeTool, snapTicks, onEdit, onOp
       role="img"
       aria-label="keyTAB score page"
       onPointerDownCapture={(event) => {
+        if (startPageSelectionDrag(event)) return;
         if (selectedNoteIds.size && !event.shiftKey && event.button === 0) {
           onClearSelection();
           event.preventDefault();
           event.stopPropagation();
         }
       }}
-      onContextMenu={(event) => {
-        if (!selectedNoteIds.size) return;
-        onClearSelection();
-        event.preventDefault();
-        event.stopPropagation();
+      onPointerMoveCapture={(event) => { updatePageSelectionDrag(event); }}
+      onPointerUpCapture={(event) => { endPageSelectionDrag(event); }}
+      onPointerCancelCapture={(event) => { endPageSelectionDrag(event); }}
+      onContextMenuCapture={(event) => {
+        if (suppressPageContextMenuRef.current) {
+          suppressPageContextMenuRef.current = false;
+          event.preventDefault();
+          event.stopPropagation();
+        }
       }}
     >
       <g className="svg-layer svg-layer-page_background"><rect width={paperWidth} height={paperHeight} fill="#f4f0f0" /></g>
@@ -1194,13 +1389,14 @@ function PaperPreview({ document, pageIndex, activeTool, snapTicks, onEdit, onOp
         {composer && <text x={composerX} y={titleY} textAnchor="end" dominantBaseline="hanging" className="score-composer" style={{ fontFamily: resolveWebSafeFontFamily(document.layout.font_composer.family), fontSize: metadataFontSize(document.layout.font_composer.size_pt), fontWeight: document.layout.font_composer.bold ? 700 : 400, fontStyle: document.layout.font_composer.italic ? "italic" : "normal", textDecoration: document.layout.font_composer.underline ? "underline" : "none" }}>{composer}</text>}
       </g>}
       {page.systems.map((system) => <SystemPreview key={system.id} document={document} page={page} system={system} activeTool={activeTool} snapTicks={snapTicks} onEdit={onEdit} onOpenStaveMenu={onOpenStaveMenu} onOpenTimeSignatureDialog={onOpenTimeSignatureDialog} onOpenTempoDialog={onOpenTempoDialog} selectedNoteIds={selectedNoteIds} onSelectionChange={onSelectionChange} onClearSelection={onClearSelection} onPasteTargetChange={onPasteTargetChange} onAuditionNote={onAuditionNote} playbackTick={playbackTick} />)}
+      {pageSelectionRect && <g className="selection-overlay" pointerEvents="none" data-export="exclude"><rect x={Math.min(pageSelectionRect.startX, pageSelectionRect.endX)} y={Math.min(pageSelectionRect.startY, pageSelectionRect.endY)} width={Math.abs(pageSelectionRect.endX - pageSelectionRect.startX)} height={Math.abs(pageSelectionRect.endY - pageSelectionRect.startY)} fill="var(--accent)" fillOpacity={0.15} stroke="var(--accent)" strokeWidth={1.5} /></g>}
       <g className="svg-layer svg-layer-page_number"><text x={footerX} y={footerY} dominantBaseline="alphabetic" className="score-footer" style={{ fontFamily: resolveWebSafeFontFamily(document.layout.font_copyright.family), fontSize: metadataFontSize(document.layout.font_copyright.size_pt), fontWeight: document.layout.font_copyright.bold ? 700 : 400, fontStyle: document.layout.font_copyright.italic ? "italic" : "normal", textDecoration: document.layout.font_copyright.underline ? "underline" : "none" }}>{footer}</text></g>
     </svg>
   );
 }
 
 export default function App() {
-  const [document, setDocument] = useState<KeyTabDocument>(() => createDocument());
+  const [document, setDocument] = useState<KeyTabDocument>(() => createDocument(loadDefaultLayoutTemplate()));
   const [fileName, setFileName] = useState("Untitled.ktw");
   const [activeMenu, setActiveMenu] = useState<string | null>(null);
   const [activeTool, setActiveTool] = useState<Tool>("left");
@@ -1212,6 +1408,7 @@ export default function App() {
   const [sessionReady, setSessionReady] = useState(false);
   const [scoreInfoDialogOpen, setScoreInfoDialogOpen] = useState(false);
   const [styleDialogOpen, setStyleDialogOpen] = useState(false);
+  const [manualOpen, setManualOpen] = useState(false);
   const [discardPrompt, setDiscardPrompt] = useState<{ action: string; resolve: (choice: DiscardChoice) => void } | null>(null);
   const [midiImport, setMidiImport] = useState<{ parsed: ParsedMidiFile; title: string; sourceName: string } | null>(null);
   const [tempoEdit, setTempoEdit] = useState<TempoEditTarget | null>(null);
@@ -1328,6 +1525,16 @@ export default function App() {
     setStatus(`${noteIds.length} note${noteIds.length === 1 ? "" : "s"} selected`);
   };
 
+  const selectAllObjects = () => {
+    const noteIds = documentRef.current.pages
+      .flatMap((page) => page.systems)
+      .flatMap((system) => system.staves)
+      .flatMap((stave) => stave.events)
+      .filter((event): event is NoteEvent => event.type === "note")
+      .map((note) => note.id);
+    selectNotes(noteIds);
+  };
+
   const selectedNotes = (): NoteClipboardEntry[] => documentRef.current.pages
     .flatMap((page) => page.systems)
     .flatMap((system, systemIndex) => system.staves.flatMap((stave, staveIndex) => stave.events
@@ -1360,28 +1567,23 @@ export default function App() {
       setStatus("Move the mouse over a system before pasting");
       return;
     }
-    const systems = documentRef.current.pages.flatMap((page) => page.systems);
-    const targetSystem = systems.find((system) => system.id === pasteTarget.systemId);
-    if (!targetSystem) return;
     const firstCopiedTime = Math.min(...copied.map((entry) => entry.note.time));
-    const notesToPaste = copied.flatMap((entry) => {
-      const stave = targetSystem.staves[entry.staveIndex];
-      if (!stave) return [];
+    const notesToPaste = copied.map((entry) => {
       const note = structuredClone(entry.note);
       note.id = newId();
       note.time = pasteTarget.time + entry.note.time - firstCopiedTime;
-      note.duration = Math.min(note.duration, targetSystem.end_tick - note.time);
       note.continuation_id = null;
       note.continues_from_previous = false;
       note.continues_to_next = false;
-      return note.duration > 0 ? [{ systemId: targetSystem.id, staveId: stave.id, note }] : [];
+      return { staveIndex: entry.staveIndex, note };
     });
     if (!notesToPaste.length) return;
     editDocument((editableDocument) => {
+      ensureScoreDuration(editableDocument, Math.max(...notesToPaste.map(({ note }) => note.time + note.duration)));
       const editableSystems = editableDocument.pages.flatMap((page) => page.systems);
       for (const entry of notesToPaste) {
-        const system = editableSystems.find((candidate) => candidate.id === entry.systemId);
-        const stave = system?.staves.find((candidate) => candidate.id === entry.staveId);
+        const system = editableSystems.find((candidate) => candidate.start_tick <= entry.note.time && entry.note.time < candidate.end_tick);
+        const stave = system?.staves[entry.staveIndex];
         if (!system || !stave) continue;
         stave.events.push(entry.note);
       }
@@ -1433,7 +1635,7 @@ export default function App() {
   };
 
   const createNewDocument = () => {
-    const nextDocument = createDocument();
+    const nextDocument = createDocument(loadDefaultLayoutTemplate());
     undoStackRef.current = [];
     redoStackRef.current = [];
     desktopFilePathRef.current = null;
@@ -1607,6 +1809,7 @@ export default function App() {
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
+      if (styleDialogOpen || manualOpen) return;
       const target = event.target;
       if (target instanceof HTMLElement && target.closest("input, textarea, select, [contenteditable='true']")) return;
       if (event.ctrlKey || event.metaKey) {
@@ -1627,6 +1830,9 @@ export default function App() {
         } else if (key === "y") {
           event.preventDefault();
           redoDocument();
+        } else if (key === "a") {
+          event.preventDefault();
+          selectAllObjects();
         } else if (key === "c") {
           event.preventDefault();
           copySelectedNotes();
@@ -1687,7 +1893,7 @@ export default function App() {
     };
     window.addEventListener("keydown", handleShortcut);
     return () => window.removeEventListener("keydown", handleShortcut);
-  }, [document, isPlaying, selectedNoteIds, snapTicks]);
+  }, [document, isPlaying, manualOpen, selectedNoteIds, snapTicks, styleDialogOpen]);
 
   useEffect(() => () => {
     playbackRef.current?.stop();
@@ -1737,8 +1943,8 @@ export default function App() {
     const pan = panRef.current;
     const viewport = canvasAreaRef.current;
     if (!pan || pan.pointerId !== event.pointerId || !viewport) return;
-    viewport.scrollLeft += event.clientX - pan.x;
-    viewport.scrollTop += event.clientY - pan.y;
+    viewport.scrollLeft -= event.clientX - pan.x;
+    viewport.scrollTop -= event.clientY - pan.y;
     pan.x = event.clientX;
     pan.y = event.clientY;
   };
@@ -1986,8 +2192,24 @@ export default function App() {
     else if (item === "Save") void saveDocument();
     else if (item === "Save As...") void saveDocument(true);
     else if (item === "Export PDF...") void exportPdf();
+    else if (item === "Set current file as default template") {
+      try {
+        saveDefaultLayoutTemplate(document.layout);
+        setStatus("Current layout saved as default template");
+      } catch {
+        setStatus("Could not save the default template");
+      }
+    } else if (item === "Reset Default template") {
+      try {
+        resetDefaultLayoutTemplate();
+        setStatus("Default template reset");
+      } catch {
+        setStatus("Could not reset the default template");
+      }
+    }
     else if (item === "Score Info...") setScoreInfoDialogOpen(true);
     else if (item === "Style...") setStyleDialogOpen(true);
+    else if (item === "Manual...") setManualOpen(true);
     else if (item === "Undo") undoDocument();
     else if (item === "Redo") redoDocument();
     else if (item === "Snap Band") editDocument((editableDocument) => {
@@ -1997,10 +2219,10 @@ export default function App() {
   };
 
   const menuItems: Record<string, string[]> = {
-    File: ["New", "Open...", "Import MIDI...", "Save", "Save As...", "Export PDF..."],
+    File: ["New", "Open...", "Import MIDI...", "Save", "Save As...", "Export PDF...", "Set current file as default template", "Reset Default template"],
     Edit: ["Score Info...", "Style...", "Preferences...", "Undo", "Redo"],
     View: ["Snap Band"],
-    Help: ["About keyTAB"],
+    Help: ["Manual...", "About keyTAB"],
   };
 
   return (
@@ -2032,6 +2254,7 @@ export default function App() {
         <IconButton label="Left note input" active={activeTool === "left"} onClick={() => setActiveTool("left")}><KeyTabIcon src={leftNoteIcon} /></IconButton>
         <IconButton label="Right note input" active={activeTool === "right"} onClick={() => setActiveTool("right")}><KeyTabIcon src={rightNoteIcon} /></IconButton>
         <IconButton label="Arpeggio" active={activeTool === "arpeggio"} onClick={() => setActiveTool("arpeggio")}><KeyTabIcon src={arpeggioIcon} /></IconButton>
+        <IconButton label="Count line" active={activeTool === "count_line"} onClick={() => setActiveTool("count_line")}><KeyTabIcon src={countLineIcon} /></IconButton>
         <IconButton label="System break" active={activeTool === "break"} onClick={() => setActiveTool("break")}><KeyTabIcon src={lineBreakIcon} /></IconButton>
         <IconButton label="Time signature" active={activeTool === "meter"} onClick={() => setActiveTool("meter")}><KeyTabIcon src={timeSignatureIcon} /></IconButton>
         <IconButton label="Tempo" active={activeTool === "tempo"} onClick={() => setActiveTool("tempo")}><KeyTabIcon src={tempoIcon} /></IconButton>
@@ -2092,6 +2315,7 @@ export default function App() {
           setStyleDialogOpen(false);
         }}
       />}
+      {manualOpen && <ManualDialog onClose={() => setManualOpen(false)} />}
       {midiImport && <MidiImportDialog
         parsed={midiImport.parsed}
         onClose={() => setMidiImport(null)}

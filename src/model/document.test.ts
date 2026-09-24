@@ -4,6 +4,7 @@ import {
   createDocument,
   createLayout,
   deserializeDocument,
+  ensureScoreDuration,
   engravingMm,
   engravingPtToMm,
   engravingScale,
@@ -35,6 +36,15 @@ describe("keyTAB document model", () => {
       composer: "keyTAB_web",
       copyright: `\u00A9 keyTAB_web ${new Date().getFullYear()}`,
     });
+  });
+
+  it("applies a layout template to a new document without sharing it", () => {
+    const template = createLayout();
+    template.scale = 0.5;
+    const document = createDocument(template);
+    template.scale = 0.25;
+
+    expect(document.layout.scale).toBe(0.5);
   });
 
   it("round-trips serialized native document data", () => {
@@ -140,6 +150,14 @@ describe("keyTAB document model", () => {
     expect(document.base_grid.at(-1)!.measure_amount).toBe(15);
     removeMeasure(document);
     expect(document.base_grid.at(-1)!.measure_amount).toBe(14);
+  });
+
+  it("adds whole measures when score content extends beyond the final bar", () => {
+    const document = createDocument();
+    ensureScoreDuration(document, 16385);
+
+    expect(document.base_grid.at(-1)!.measure_amount).toBe(17);
+    expect(document.pages.flatMap((page) => page.systems).at(-1)!.end_tick).toBe(17408);
   });
 
   it("extends the final grid instead of discarding notes after a time-signature change", () => {

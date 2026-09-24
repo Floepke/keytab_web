@@ -1,3 +1,5 @@
+import type { Layout } from "./model/types";
+
 export interface SessionSnapshot {
   contents: string;
   fileName: string;
@@ -23,6 +25,7 @@ const DATABASE_NAME = "keytab-web";
 const STORE_NAME = "session";
 const SESSION_KEY = "recovery";
 const LAST_FILE_KEY = "last-file";
+const DEFAULT_LAYOUT_TEMPLATE_KEY = "default-layout-template";
 const FILE_TYPES = [{ description: "keyTAB score", accept: { "application/json": [".ktw"] } }];
 
 function openDatabase(): Promise<IDBDatabase> {
@@ -68,6 +71,26 @@ export const saveSessionSnapshot = (snapshot: SessionSnapshot) => writeValue(SES
 export const loadLastFileHandle = () => readValue<StoredFileHandle>(LAST_FILE_KEY);
 export const saveLastFileHandle = (handle: StoredFileHandle) => writeValue(LAST_FILE_KEY, handle);
 export const clearLastFileHandle = () => removeValue(LAST_FILE_KEY);
+
+export function loadDefaultLayoutTemplate(): Layout | null {
+  try {
+    if (typeof localStorage === "undefined") return null;
+    const storedLayout = localStorage.getItem(DEFAULT_LAYOUT_TEMPLATE_KEY);
+    if (!storedLayout) return null;
+    const layout = JSON.parse(storedLayout);
+    return typeof layout === "object" && layout !== null && !Array.isArray(layout) ? layout as Layout : null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveDefaultLayoutTemplate(layout: Layout): void {
+  localStorage.setItem(DEFAULT_LAYOUT_TEMPLATE_KEY, JSON.stringify(layout));
+}
+
+export function resetDefaultLayoutTemplate(): void {
+  localStorage.removeItem(DEFAULT_LAYOUT_TEMPLATE_KEY);
+}
 
 export function hasFileSystemAccess(): boolean {
   return typeof window !== "undefined" && typeof (window as FilePickerWindow).showOpenFilePicker === "function";

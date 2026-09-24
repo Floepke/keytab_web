@@ -171,8 +171,8 @@ export function createLayout(): Layout {
   };
 }
 
-export function createDocument(): KeyTabDocument {
-  const layout = createLayout();
+export function createDocument(layoutTemplate: Layout | null = null): KeyTabDocument {
+  const layout = layoutTemplate ? structuredClone(layoutTemplate) : createLayout();
   const baseGrid = { ...createBaseGrid(), measure_amount: 16 };
   const currentYear = new Date().getFullYear();
   const system: System = {
@@ -629,6 +629,16 @@ function syncScoreDuration(document: KeyTabDocument): void {
   });
   document.pages = [{ ...document.pages[0], systems: retained, events: [] }];
   repaginateDocument(document);
+}
+
+export function ensureScoreDuration(document: KeyTabDocument, requiredEndTick: number): void {
+  const finalGrid = document.base_grid.at(-1)!;
+  const finalMeasureDuration = measureDuration(finalGrid, document.time_per_quarter);
+  const gridEndTick = totalDuration(document.base_grid, document.time_per_quarter);
+  if (requiredEndTick > gridEndTick) {
+    finalGrid.measure_amount += Math.ceil((requiredEndTick - gridEndTick) / finalMeasureDuration);
+  }
+  syncScoreDuration(document);
 }
 
 export function setTimeSignature(document: KeyTabDocument, time: number, numerator: number, denominator: number, indicatorEnabled: boolean): void {

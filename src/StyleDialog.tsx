@@ -41,6 +41,16 @@ const NUMBERS: Partial<Record<LayoutField, NumericConfig>> = {
 const FONT_FIELDS = new Set<LayoutField>(["time_signature_indicator_classic_font", "time_signature_indicator_klavarskribo_font", "measure_numbering_font", "tempo_font", "font_text", "font_title", "font_composer", "font_copyright", "font_arranger", "font_lyricist"]);
 const label = (field: string) => field.replace(/_/g, " ").replace(/\bmm\b/g, "mm").replace(/\b\w/g, (letter) => letter.toUpperCase());
 const cloneLayout = (layout: Layout): Layout => structuredClone(layout);
+const parseArray = (text: string) => text.trim().split(/\s+/).filter(Boolean).map(Number).filter(Number.isFinite);
+
+function ArrayInput({ value, onChange }: { value: readonly number[]; onChange: (value: number[]) => void }) {
+  const [text, setText] = useState(() => value.join(" "));
+  return <input value={text} onChange={(event) => {
+    const nextText = event.target.value;
+    setText(nextText);
+    onChange(parseArray(nextText));
+  }} />;
+}
 
 function NumberInput({ value, min, max, step, onChange, ...props }: { value: number; min?: number; max?: number; step: number; onChange: (value: number) => void } & Omit<React.InputHTMLAttributes<HTMLInputElement>, "value" | "min" | "max" | "step" | "onChange">) {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -80,7 +90,6 @@ export function StyleDialog({ layout, onApply, onClose }: { layout: Layout; onAp
   const [gridTrackError, setGridTrackError] = useState("");
   const [, fields] = CATEGORIES.find(([title]) => title === activeTab) ?? CATEGORIES[0];
   const update = <K extends LayoutField>(field: K, value: Layout[K]) => setDraft((current) => ({ ...current, [field]: value }));
-  const updateArray = (field: LayoutField, event: ChangeEvent<HTMLInputElement>) => update(field, event.target.value.split(/[ ,]+/).filter(Boolean).map(Number).filter(Number.isFinite) as Layout[typeof field]);
   const updateTrack = (value: string) => {
     try {
       update("grid_band_track", value.trim() ? JSON.parse(value) : []);
@@ -94,7 +103,7 @@ export function StyleDialog({ layout, onApply, onClose }: { layout: Layout; onAp
     if (typeof value === "boolean") return <input type="checkbox" checked={value} onChange={(event) => update(field, event.target.checked as Layout[typeof field])} />;
     if (FONT_FIELDS.has(field)) return <FontEditor value={value as Font} onChange={(next) => update(field, next as Layout[typeof field])} />;
     if (field === "grid_band_track") return <><textarea value={JSON.stringify(value)} onChange={(event) => updateTrack(event.target.value)} rows={3} />{gridTrackError && <small className="field-error">{gridTrackError}</small>}</>;
-    if (Array.isArray(value)) return <input value={value.join(", ")} onChange={(event) => updateArray(field, event)} />;
+    if (Array.isArray(value)) return <ArrayInput key={field} value={value as number[]} onChange={(next) => update(field, next as Layout[typeof field])} />;
     if (CHOICES[field]) return <select value={value as string} onChange={(event) => update(field, event.target.value as Layout[typeof field])}>{CHOICES[field]!.map((choice) => <option key={choice} value={choice}>{choice.replace(/_/g, " ")}</option>)}</select>;
     if (typeof value === "number") {
       const config = NUMBERS[field] ?? { min: -1000, max: 10000, step: 0.05 };
@@ -105,7 +114,7 @@ export function StyleDialog({ layout, onApply, onClose }: { layout: Layout; onAp
   };
 
   return <div className="dialog-backdrop" role="presentation" onMouseDown={onClose}>
-    <section className="style-dialog" role="dialog" aria-modal="true" aria-label="Style" onMouseDown={(event) => event.stopPropagation()}>
+    <section className="style-dialog" role="dialog" aria-modal="true" aria-label="Style" onMouseDown={(event) => event.stopPropagation()} onKeyDownCapture={(event) => event.stopPropagation()}>
       <header><h2>Style</h2><button type="button" aria-label="Close style dialog" onClick={onClose}>x</button></header>
       <div className="style-tabs" role="tablist">{CATEGORIES.map(([title]) => <button type="button" key={title} role="tab" aria-selected={activeTab === title} className={activeTab === title ? "active" : ""} onClick={() => setActiveTab(title)}>{title}</button>)}</div>
       <div className="style-fields">{fields.map((field) => <label className="style-field" key={field}><span>{label(field)}</span>{editor(field)}</label>)}</div>
