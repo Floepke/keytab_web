@@ -272,7 +272,7 @@ function SystemPreview({
     staveId: string;
     pointerId: number;
   } | null>(null);
-  const countLineDragRef = useRef<{ id: string; part: "start" | "end" | "line"; pointerId: number; startTime: number; startPointerTime: number; startRpitch1: number; startRpitch2: number; startRpitch: number } | null>(null);
+  const countLineDragRef = useRef<{ id: string; staveId: string; part: "start" | "end" | "line"; pointerId: number; startTime: number; startPointerTime: number; startRpitch1: number; startRpitch2: number; startRpitch: number } | null>(null);
   const selectionDragRef = useRef<{ pointerId: number; startX: number; startY: number; startClientX: number; startClientY: number; rightButton: boolean } | null>(null);
   const suppressContextMenuRef = useRef(false);
   const [inputPreview, setInputPreview] = useState<{ staveId: string; time: number; pitch: number } | null>(null);
@@ -783,34 +783,40 @@ function SystemPreview({
   const renderedNoteGeometries = [...noteGeometries, ...additionalNoteGeometries];
   const noteGeometriesInPaintOrder = [...noteGeometries].sort((first, second) => Number(first.isBlackKey) - Number(second.isBlackKey));
   const renderedNoteGeometriesInPaintOrder = [...renderedNoteGeometries].sort((first, second) => Number(first.isBlackKey) - Number(second.isBlackKey));
-  const countLines = stave.events.filter((event): event is CountLineEvent => event.type === "count_line");
-  const countLineHandleHalfMm = Math.max(semitoneMm, 6 / PIXELS_PER_MM) * 0.7;
-  const countLineRpitchBounds = (() => {
-    const centreMm = pitchToXmm(60, stave, staveLeftMm, document.layout);
-    return {
-      min: Math.ceil((countLineHandleHalfMm - centreMm) / semitoneMm),
-      max: Math.floor((page.width_mm - countLineHandleHalfMm - centreMm) / semitoneMm),
+  const countLineMetrics = (target: typeof staveTargets[number]) => {
+    const handleHalfMm = Math.max(target.semitoneMm, 6 / PIXELS_PER_MM) * 0.7;
+    const centreMm = pitchToXmm(60, target.stave, target.leftMm, document.layout);
+    const bounds = {
+      min: Math.ceil((handleHalfMm - centreMm) / target.semitoneMm),
+      max: Math.floor((page.width_mm - handleHalfMm - centreMm) / target.semitoneMm),
     };
-  })();
-  const clampCountLineRpitch = (rpitch: number) => Math.max(
-    countLineRpitchBounds.min,
-    Math.min(countLineRpitchBounds.max, rpitch),
-  );
-  const countLineRpitchAt = (xMm: number) => clampCountLineRpitch(Math.round((xMm - pitchToXmm(60, stave, staveLeftMm, document.layout)) / semitoneMm));
-  const countLineTargetAt = (xMm: number, yMm: number): { line: CountLineEvent; part: "start" | "end" | "line" } | null => {
+    const clamp = (rpitch: number) => Math.max(bounds.min, Math.min(bounds.max, rpitch));
+    return {
+      bounds,
+      clamp,
+      centreX: mmToPixels(centreMm),
+      semitonePx: mmToPixels(target.semitoneMm),
+      tolerance: Math.max(mmToPixels(target.semitoneMm) * 0.7, 6),
+      handleSize: Math.max(mmToPixels(target.semitoneMm), 6) * 1.4,
+      rpitchAt: (xMm: number) => clamp(Math.round((xMm - centreMm) / target.semitoneMm)),
+      scale: document.layout.scale * target.stave.scale,
+    };
+  };
+  const countLineTargetAt = (xMm: number, yMm: number): { line: CountLineEvent; staveTarget: typeof staveTargets[number]; part: "start" | "end" | "line" } | null => {
     if (activeTool !== "count_line") return null;
     const x = mmToPixels(xMm);
     const y = mmToPixels(yMm);
-    const centralCX = xAtPitch(60);
-    const tolerance = Math.max(mmToPixels(semitoneMm) * 0.7, 6);
-    for (const line of [...countLines].reverse()) {
-      if (line.start_tick < system.start_tick || line.start_tick >= system.end_tick) continue;
-      const lineY = yAt(line.start_tick);
-      const startX = centralCX + clampCountLineRpitch(line.rpitch1) * mmToPixels(semitoneMm);
-      const endX = centralCX + clampCountLineRpitch(line.rpitch2) * mmToPixels(semitoneMm);
-      if (Math.abs(x - startX) <= tolerance && Math.abs(y - lineY) <= tolerance) return { line, part: "start" };
-      if (Math.abs(x - endX) <= tolerance && Math.abs(y - lineY) <= tolerance) return { line, part: "end" };
-      if (Math.abs(y - lineY) <= tolerance / 2 && x >= Math.min(startX, endX) && x <= Math.max(startX, endX)) return { line, part: "line" };
+    for (const staveTarget of staveTargets) {
+      const metrics = countLineMetrics(staveTarget);
+      for (const line of [...staveTarget.stave.events].reverse()) {
+        if (line.type !== "count_line" || line.start_tick < system.start_tick || line.start_tick >= system.end_tick) continue;
+        const lineY = yAt(line.start_tick);
+        const startX = metrics.centreX + metrics.clamp(line.rpitch1) * metrics.semitonePx;
+        const endX = metrics.centreX + metrics.clamp(line.rpitch2) * metrics.semitonePx;
+        if (Math.abs(x - startX) <= metrics.tolerance && Math.abs(y - lineY) <= metrics.tolerance) return { line, staveTarget, part: "start" };
+        if (Math.abs(x - endX) <= metrics.tolerance && Math.abs(y - lineY) <= metrics.tolerance) return { line, staveTarget, part: "end" };
+        if (Math.abs(y - lineY) <= metrics.tolerance / 2 && x >= Math.min(startX, endX) && x <= Math.max(startX, endX)) return { line, staveTarget, part: "line" };
+      }
     }
     return null;
   };
@@ -822,31 +828,38 @@ function SystemPreview({
     event.currentTarget.setPointerCapture(event.pointerId);
     const target = countLineTargetAt(xMm, yMm);
     if (target) {
-      countLineDragRef.current = { id: target.line.id, part: target.part, pointerId: event.pointerId, startTime: target.line.start_tick, startPointerTime: snapTimeAt(yMm), startRpitch1: clampCountLineRpitch(target.line.rpitch1), startRpitch2: clampCountLineRpitch(target.line.rpitch2), startRpitch: countLineRpitchAt(xMm) };
+      const metrics = countLineMetrics(target.staveTarget);
+      countLineDragRef.current = { id: target.line.id, staveId: target.staveTarget.stave.id, part: target.part, pointerId: event.pointerId, startTime: target.line.start_tick, startPointerTime: snapTimeAt(yMm), startRpitch1: metrics.clamp(target.line.rpitch1), startRpitch2: metrics.clamp(target.line.rpitch2), startRpitch: metrics.rpitchAt(xMm) };
       return true;
     }
+    const staveTarget = staveTargetAt(xMm);
+    if (!staveTarget) return false;
+    const metrics = countLineMetrics(staveTarget);
     const line = createEvent("count_line") as CountLineEvent;
-    const rpitch = countLineRpitchAt(xMm);
+    const rpitch = metrics.rpitchAt(xMm);
     line.start_tick = snapTimeAt(yMm);
     line.rpitch1 = rpitch;
     line.rpitch2 = rpitch;
-    countLineDragRef.current = { id: line.id, part: "end", pointerId: event.pointerId, startTime: line.start_tick, startPointerTime: line.start_tick, startRpitch1: rpitch, startRpitch2: rpitch, startRpitch: rpitch };
-    onEdit((editableDocument) => { locateStave(editableDocument)?.[1].events.push(line); }, "Count line added");
+    countLineDragRef.current = { id: line.id, staveId: staveTarget.stave.id, part: "end", pointerId: event.pointerId, startTime: line.start_tick, startPointerTime: line.start_tick, startRpitch1: rpitch, startRpitch2: rpitch, startRpitch: rpitch };
+    onEdit((editableDocument) => { locateStave(editableDocument, staveTarget.stave.id)?.[1].events.push(line); }, "Count line added");
     return true;
   };
   const updateCountLineDrag = (event: PointerEvent<SVGElement>) => {
     const drag = countLineDragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return false;
     const { xMm, yMm } = pointAt(event);
-    const rpitch = countLineRpitchAt(xMm);
+    const staveTarget = staveTargetById(drag.staveId);
+    if (!staveTarget) return false;
+    const metrics = countLineMetrics(staveTarget);
+    const rpitch = metrics.rpitchAt(xMm);
     onEdit((editableDocument) => {
-      const line = locateStave(editableDocument)?.[1].events.find((candidate): candidate is CountLineEvent => candidate.type === "count_line" && candidate.id === drag.id);
+      const line = locateStave(editableDocument, drag.staveId)?.[1].events.find((candidate): candidate is CountLineEvent => candidate.type === "count_line" && candidate.id === drag.id);
       if (!line) return;
-      line.rpitch1 = clampCountLineRpitch(line.rpitch1);
-      line.rpitch2 = clampCountLineRpitch(line.rpitch2);
+      line.rpitch1 = metrics.clamp(line.rpitch1);
+      line.rpitch2 = metrics.clamp(line.rpitch2);
       if (drag.part === "line") {
-        const minDelta = countLineRpitchBounds.min - Math.min(drag.startRpitch1, drag.startRpitch2);
-        const maxDelta = countLineRpitchBounds.max - Math.max(drag.startRpitch1, drag.startRpitch2);
+        const minDelta = metrics.bounds.min - Math.min(drag.startRpitch1, drag.startRpitch2);
+        const maxDelta = metrics.bounds.max - Math.max(drag.startRpitch1, drag.startRpitch2);
         const delta = Math.max(minDelta, Math.min(maxDelta, rpitch - drag.startRpitch));
         line.start_tick = Math.max(system.start_tick, Math.min(system.end_tick - snapTicks, drag.startTime + snapTimeAt(yMm) - drag.startPointerTime));
         line.rpitch1 = drag.startRpitch1 + delta;
@@ -872,7 +885,7 @@ function SystemPreview({
     const target = countLineTargetAt(xMm, yMm);
     if (!target) return false;
     onEdit((editableDocument) => {
-      const editableStave = locateStave(editableDocument)?.[1];
+      const editableStave = locateStave(editableDocument, target.staveTarget.stave.id)?.[1];
       if (!editableStave) return;
       editableStave.events = editableStave.events.filter((candidate) => candidate.id !== target.line.id);
     }, "Count line removed");
@@ -950,34 +963,39 @@ function SystemPreview({
     }
     return connectors;
   });
-  const explicitBeams = stave.events.filter((event) => event.type === "beam");
-  const automaticBeams = applyBeamOverrides(
-    beamWindows(document.base_grid, document.time_per_quarter),
-    explicitBeams.map((beam) => [beam.time, beam.time + beam.duration]),
-  );
-  const beamGeometries = ["left", "right"].flatMap((hand) => automaticBeams.flatMap(([startTick, endTick]) => {
-    const members = noteGeometries.filter((geometry) => geometry.note.hand === hand && time.ge(geometry.note.time, startTick) && time.lt(geometry.note.time, endTick));
-    if (members.length < 2) return [];
-    const first = members.reduce((earliest, member) => time.lt(member.note.time, earliest.note.time) ? member : earliest);
-    const last = members.reduce((latest, member) => time.gt(member.note.time, latest.note.time) ? member : latest);
-    if (time.eq(first.note.time, last.note.time)) return [];
-    const continuationMembers = noteGeometries.filter((geometry) => geometry.note.hand === hand
-      && time.lt(geometry.note.time, startTick)
-      && time.gt(geometry.note.time + geometry.note.duration, startTick)
-      && geometry.dots.some(([, dotY]) => dotY >= yAt(startTick) && dotY < yAt(endTick)));
-    const beamAnchors = [...members, ...continuationMembers];
-    const pitchAnchor = hand === "left"
-      ? beamAnchors.reduce((lowest, member) => member.note.pitch < lowest.note.pitch ? member : lowest)
-      : beamAnchors.reduce((highest, member) => member.note.pitch > highest.note.pitch ? member : highest);
-    const width = mmToPixels(document.layout.beam_thickness_mm * scale);
-    const x1 = pitchAnchor.stemTipX;
-    const x2 = x1 + (hand === "left" ? -mmToPixels(semitoneMm) : mmToPixels(semitoneMm));
-    const polygon: [number, number][] = [[x1 - width / 2, first.start - noteStrokePx / 2], [x2 - width / 2, last.start + noteStrokePx / 2], [x2 + width / 2, last.start + noteStrokePx / 2], [x1 + width / 2, first.start - noteStrokePx / 2]];
-    return [{ id: `${hand}-${startTick}-${endTick}`, startTick, endTick, polygon, connectors: members.map((member) => {
-      const fraction = (member.note.time - first.note.time) / Math.max(1, last.note.time - first.note.time);
-      return [member.stemTipX, member.start, x1 + (x2 - x1) * fraction, member.start] as const;
-    }) }];
-  }));
+  const beamGeometries = staveTargets.flatMap((target) => {
+    const targetGeometries = renderedNoteGeometries.filter((geometry) => geometry.staveId === target.stave.id);
+    const explicitBeams = target.stave.events.filter((event) => event.type === "beam");
+    const automaticBeams = applyBeamOverrides(
+      beamWindows(document.base_grid, document.time_per_quarter),
+      explicitBeams.map((beam) => [beam.time, beam.time + beam.duration]),
+    );
+    const targetScale = document.layout.scale * target.stave.scale;
+    const beamWidth = mmToPixels(document.layout.beam_thickness_mm * targetScale);
+    const semitoneWidth = mmToPixels(target.semitoneMm);
+    return ["left", "right"].flatMap((hand) => automaticBeams.flatMap(([startTick, endTick]) => {
+      const members = targetGeometries.filter((geometry) => geometry.note.hand === hand && time.ge(geometry.note.time, startTick) && time.lt(geometry.note.time, endTick));
+      if (members.length < 2) return [];
+      const first = members.reduce((earliest, member) => time.lt(member.note.time, earliest.note.time) ? member : earliest);
+      const last = members.reduce((latest, member) => time.gt(member.note.time, latest.note.time) ? member : latest);
+      if (time.eq(first.note.time, last.note.time)) return [];
+      const continuationMembers = targetGeometries.filter((geometry) => geometry.note.hand === hand
+        && time.lt(geometry.note.time, startTick)
+        && time.gt(geometry.note.time + geometry.note.duration, startTick)
+        && geometry.dots.some(([, dotY]) => dotY >= yAt(startTick) && dotY < yAt(endTick)));
+      const beamAnchors = [...members, ...continuationMembers];
+      const pitchAnchor = hand === "left"
+        ? beamAnchors.reduce((lowest, member) => member.note.pitch < lowest.note.pitch ? member : lowest)
+        : beamAnchors.reduce((highest, member) => member.note.pitch > highest.note.pitch ? member : highest);
+      const x1 = pitchAnchor.stemTipX;
+      const x2 = x1 + (hand === "left" ? -semitoneWidth : semitoneWidth);
+      const polygon: [number, number][] = [[x1 - beamWidth / 2, first.start - first.noteStrokePx / 2], [x2 - beamWidth / 2, last.start + first.noteStrokePx / 2], [x2 + beamWidth / 2, last.start + first.noteStrokePx / 2], [x1 + beamWidth / 2, first.start - first.noteStrokePx / 2]];
+      return [{ id: `${target.stave.id}-${hand}-${startTick}-${endTick}`, staveId: target.stave.id, startTick, endTick, polygon, strokeWidth: first.noteStrokePx, connectors: members.map((member) => {
+        const fraction = (member.note.time - first.note.time) / Math.max(1, last.note.time - first.note.time);
+        return [member.stemTipX, member.start, x1 + (x2 - x1) * fraction, member.start] as const;
+      }) }];
+    }));
+  });
   const notationCutsAt = (tick: number): [number, number][] => {
     const padding = mmToPixels(2 * scale);
     const intervals: [number, number][] = [];
@@ -991,6 +1009,7 @@ function SystemPreview({
       .filter((connector) => connector.staveId === stave.id && time.eq(connector.tick, tick))
       .forEach((connector) => intervals.push([connector.x1 - padding, connector.x2 + padding]));
     for (const beam of beamGeometries) {
+      if (beam.staveId !== stave.id) continue;
       if (!time.ge(tick, beam.startTick) || !time.le(tick, beam.endTick)) continue;
       const ratio = (tick - beam.startTick) / (beam.endTick - beam.startTick);
       const startCenter = (beam.polygon[0][0] + beam.polygon[3][0]) * 0.5;
@@ -1025,15 +1044,29 @@ function SystemPreview({
   };
   const segmentedStaveLine = (tick: number, bounds: [number, number], staveId: string, keyPrefix: string, className: string, strokeWidth?: number, stroke?: string, strokeDasharray?: string) => {
     const padding = mmToPixels(2 * document.layout.scale);
-    const cuts = renderedNoteGeometries
-      .filter((geometry) => geometry.staveId === staveId && time.eq(geometry.note.time, tick))
-      .flatMap((geometry) => [
-        [geometry.x - geometry.headHalfWidth - padding, geometry.x + geometry.headHalfWidth + padding] as [number, number],
-        [Math.min(geometry.x, geometry.stemTipX) - padding, Math.max(geometry.x, geometry.stemTipX) + padding] as [number, number],
-        ...chordConnectors
-          .filter((connector) => connector.staveId === staveId && time.eq(connector.tick, tick))
-          .map((connector) => [connector.x1 - padding, connector.x2 + padding] as [number, number]),
-      ])
+    const cuts = [
+      ...renderedNoteGeometries
+        .filter((geometry) => geometry.staveId === staveId && time.eq(geometry.note.time, tick))
+        .flatMap((geometry) => [
+          [geometry.x - geometry.headHalfWidth - padding, geometry.x + geometry.headHalfWidth + padding] as [number, number],
+          [Math.min(geometry.x, geometry.stemTipX) - padding, Math.max(geometry.x, geometry.stemTipX) + padding] as [number, number],
+        ]),
+      ...chordConnectors
+        .filter((connector) => connector.staveId === staveId && time.eq(connector.tick, tick))
+        .map((connector) => [connector.x1 - padding, connector.x2 + padding] as [number, number]),
+      ...beamGeometries
+        .filter((beam) => beam.staveId === staveId && time.ge(tick, beam.startTick) && time.le(tick, beam.endTick))
+        .flatMap((beam) => {
+          const ratio = (tick - beam.startTick) / (beam.endTick - beam.startTick);
+          const startCenter = (beam.polygon[0][0] + beam.polygon[3][0]) * 0.5;
+          const endCenter = (beam.polygon[1][0] + beam.polygon[2][0]) * 0.5;
+          const beamX = startCenter + (endCenter - startCenter) * ratio;
+          return [
+            [beamX - padding, beamX + padding] as [number, number],
+            ...beam.connectors.filter((connector) => time.eq(yAt(tick), connector[1])).map(([x1, , x2]) => [Math.min(x1, x2) - padding, Math.max(x1, x2) + padding] as [number, number]),
+          ];
+        }),
+    ]
       .map(([start, end]) => [Math.max(mmToPixels(bounds[0]), start), Math.min(mmToPixels(bounds[1]), end)] as [number, number])
       .filter(([start, end]) => end > start)
       .sort(([left], [right]) => left - right);
@@ -1298,13 +1331,14 @@ function SystemPreview({
           <text x={marker.textLeft} y={(marker.startY + marker.endY) / 2} dominantBaseline="middle" style={{ fontFamily: resolveWebSafeFontFamily(font.family), fontSize: marker.fontSize, fontWeight: font.bold ? 700 : 400, fontStyle: font.italic ? "italic" : "normal", textDecoration: font.underline ? "underline" : "none" }}>{tempo.tempo}</text>
         </g>;
       }) : null,
-    count_lines: document.layout.countline_visible ? stave.events.filter((event): event is CountLineEvent => event.type === "count_line" && event.start_tick >= system.start_tick && event.start_tick < system.end_tick).map((line) => {
-      const centralCX = xAtPitch(60);
-      const startX = centralCX + clampCountLineRpitch(line.rpitch1) * mmToPixels(semitoneMm);
-      const endX = centralCX + clampCountLineRpitch(line.rpitch2) * mmToPixels(semitoneMm);
-      const y = yAt(line.start_tick);
-      const handleSize = Math.max(mmToPixels(semitoneMm), 6) * 1.4;
-      return <g key={line.id} className="count-line"><line x1={Math.min(startX, endX)} x2={Math.max(startX, endX)} y1={y} y2={y} stroke="var(--notation-color)" strokeWidth={mmToPixels(document.layout.countline_thickness_mm * scale)} strokeDasharray={dashPatternPixels(document.layout.countline_dash_pattern, scale)} />{activeTool === "count_line" && <><rect fill="var(--accent)" x={startX - handleSize / 2} y={y - handleSize / 2} width={handleSize} height={handleSize} /><rect fill="var(--accent)" x={endX - handleSize / 2} y={y - handleSize / 2} width={handleSize} height={handleSize} /></>}</g>;
+    count_lines: document.layout.countline_visible ? staveTargets.flatMap((target) => {
+      const metrics = countLineMetrics(target);
+      return target.stave.events.filter((event): event is CountLineEvent => event.type === "count_line" && event.start_tick >= system.start_tick && event.start_tick < system.end_tick).map((line) => {
+        const startX = metrics.centreX + metrics.clamp(line.rpitch1) * metrics.semitonePx;
+        const endX = metrics.centreX + metrics.clamp(line.rpitch2) * metrics.semitonePx;
+        const y = yAt(line.start_tick);
+        return <g key={`${target.stave.id}-${line.id}`} className="count-line"><line x1={Math.min(startX, endX)} x2={Math.max(startX, endX)} y1={y} y2={y} stroke="var(--notation-color)" strokeWidth={mmToPixels(document.layout.countline_thickness_mm * metrics.scale)} strokeDasharray={dashPatternPixels(document.layout.countline_dash_pattern, metrics.scale)} />{activeTool === "count_line" && <><rect fill="var(--accent)" x={startX - metrics.handleSize / 2} y={y - metrics.handleSize / 2} width={metrics.handleSize} height={metrics.handleSize} /><rect fill="var(--accent)" x={endX - metrics.handleSize / 2} y={y - metrics.handleSize / 2} width={metrics.handleSize} height={metrics.handleSize} /></>}</g>;
+      });
     }) : null,
     midi_body: document.layout.note_midinote_visible ? <>
       {renderedNoteGeometriesInPaintOrder.map((geometry) => {
@@ -1332,7 +1366,7 @@ function SystemPreview({
     beams: document.layout.beam_visible ? beamGeometries.map((beam) => (
       <g key={beam.id} className="beam">
         <path d={`M ${beam.polygon.map(([pointX, pointY]) => `${pointX} ${pointY}`).join(" L ")} Z`} />
-        {beam.connectors.map(([x1, y1, x2, y2], index) => <line key={index} x1={x1} y1={y1} x2={x2} y2={y2} strokeWidth={noteStrokePx} />)}
+        {beam.connectors.map(([x1, y1, x2, y2], index) => <line key={index} x1={x1} y1={y1} x2={x2} y2={y2} strokeWidth={beam.strokeWidth} />)}
       </g>
     )) : null,
     editor_controls: <g className="editor-only measure-controls" data-export="exclude">
