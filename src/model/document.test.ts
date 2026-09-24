@@ -47,6 +47,19 @@ describe("keyTAB document model", () => {
     expect(document.layout.scale).toBe(0.5);
   });
 
+  it("creates Piano and Organ score templates without changing the default new score", () => {
+    const piano = createDocument(createLayout(), "piano");
+    const organ = createDocument(createLayout(), "organ");
+
+    expect(piano.score_info.title).toBe("Piano Template");
+    expect(piano.pages.flatMap((page) => page.systems).every((system) => system.staves.map((stave) => stave.name).join() === "Piano")).toBe(true);
+    expect(organ.score_info.title).toBe("Organ Template");
+    expect(organ.pages.flatMap((page) => page.systems).map((system) => system.staves.map((stave) => [stave.name, stave.pitch_range, stave.scale]))).toEqual(Array.from({ length: 4 }, () => [
+      ["Organ Pedal", [36, 59], 0.75],
+      ["Organ Keyboard", [36, 84], 1],
+    ]));
+  });
+
   it("round-trips serialized native document data", () => {
     const document = createDocument();
     document.pages[0].systems[0].staves[0].events.push({ id: "note-1", type: "note", time: 256, duration: 128, pitch: 60, velocity: 64, hand: "left", notehead: "auto", color: "auto", acc: 0, continuation_id: null, continues_from_previous: false, continues_to_next: false });

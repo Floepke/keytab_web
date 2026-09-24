@@ -20,6 +20,18 @@ const EXTRA_GAP_AFTER_PITCH_CLASSES = new Set([4, 11]);
 const PIANO_LOW_MIDI_PITCH = 21;
 const PIANO_HIGH_MIDI_PITCH = 108;
 
+export type ScoreTemplate = "piano" | "organ";
+
+const stavesForTemplate = (template: ScoreTemplate | undefined): Stave[] => {
+  if (template === "organ") {
+    return [
+      { id: newId(), name: "Organ Pedal", pitch_range: [36, 59], scale: 0.75, left_margin_mm: 5, right_margin_mm: 5, events: [] },
+      { id: newId(), name: "Organ Keyboard", pitch_range: [36, 84], scale: 1, left_margin_mm: 5, right_margin_mm: 5, events: [] },
+    ];
+  }
+  return [{ id: newId(), name: "Piano", pitch_range: [36, 84], scale: 1, left_margin_mm: 5, right_margin_mm: 5, events: [] }];
+};
+
 const ledgerLineGroups = (): number[][] => {
   const groups: number[][] = [];
   for (let pitch = 0; pitch < 128; pitch += 1) {
@@ -171,7 +183,7 @@ export function createLayout(): Layout {
   };
 }
 
-export function createDocument(layoutTemplate: Layout | null = null): KeyTabDocument {
+export function createDocument(layoutTemplate: Layout | null = null, template?: ScoreTemplate): KeyTabDocument {
   const layout = layoutTemplate ? structuredClone(layoutTemplate) : createLayout();
   const baseGrid = { ...createBaseGrid(), measure_amount: 16 };
   const currentYear = new Date().getFullYear();
@@ -183,15 +195,7 @@ export function createDocument(layoutTemplate: Layout | null = null): KeyTabDocu
     force_page_break_before: false,
     top_mm: 0,
     height_mm: 0,
-    staves: [{
-      id: newId(),
-      name: "Piano",
-      pitch_range: [36, 84],
-      scale: 1,
-      left_margin_mm: 5,
-      right_margin_mm: 5,
-      events: [],
-    }],
+    staves: stavesForTemplate(template),
     events: [],
   };
   const page: Page = {
@@ -205,7 +209,7 @@ export function createDocument(layoutTemplate: Layout | null = null): KeyTabDocu
     format: FORMAT_NAME,
     format_version: FORMAT_VERSION,
     time_per_quarter: TIME_PER_QUARTER,
-    score_info: { title: "Untitled", composer: "keyTAB_web", copyright: `\u00A9 keyTAB_web ${currentYear}` },
+    score_info: { title: template ? `${template[0].toUpperCase()}${template.slice(1)} Template` : "Untitled", composer: "keyTAB_web", copyright: `\u00A9 keyTAB_web ${currentYear}` },
     layout,
     base_grid: [baseGrid],
     timeline_events: [createEvent("tempo") as TempoEvent],

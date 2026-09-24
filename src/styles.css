@@ -12,7 +12,7 @@ button { font: inherit; }
 .menu-button { height: 30px; padding: 0 11px; border: 0; background: transparent; color: var(--text); font-size: 13px; cursor: pointer; }
 .menu-button:hover, .menu-button:focus-visible { color: #17140c; background: var(--accent); outline: 0; }
 .menu-popover { position: absolute; top: 31px; left: 0; min-width: 168px; padding: 4px; background: var(--surface-raised); border: 1px solid var(--border); box-shadow: 0 8px 18px #03060899; }
-.menu-popover button { display: block; width: 100%; padding: 7px 12px; border: 0; background: transparent; color: var(--text); text-align: left; font-size: 13px; cursor: pointer; }
+.menu-popover button { display: block; width: 100%; padding: 7px 12px; border: 0; background: transparent; color: var(--text); text-align: left; font-size: 13px; cursor: pointer; }.menu-popover hr { height: 1px; margin: 4px 5px; border: 0; background: var(--border); }
 .menu-popover button:hover { color: #17140c; background: var(--accent); }
 .toolbar { flex: 0 0 47px; display: flex; align-items: center; gap: 2px; height: 47px; padding: 6px 8px; background: var(--surface-raised); border-bottom: 1px solid var(--border); }
 .icon-button { width: 32px; height: 32px; display: grid; place-items: center; padding: 0; border: 1px solid transparent; border-radius: 3px; color: #d4dae1; background: transparent; cursor: pointer; }

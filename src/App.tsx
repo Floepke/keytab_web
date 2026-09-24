@@ -27,7 +27,7 @@ import { exportScorePdf } from "./pdfExport";
 import { playNoteAudition, startPlayback, type PlaybackSession } from "./playback";
 import { approveDesktopClose, cancelDesktopClose, confirmDesktopDiscard, isDesktopApp, loadLastOpenedDesktopScore, onDesktopCloseRequested, openDesktopScore, saveDesktopScore } from "./desktop";
 import { chooseSaveLocation, chooseScoreFile, clearLastFileHandle, hasFileSystemAccess, loadDefaultLayoutTemplate, loadLastFileHandle, loadSessionSnapshot, resetDefaultLayoutTemplate, saveDefaultLayoutTemplate, saveLastFileHandle, saveSessionSnapshot, type StoredFileHandle } from "./sessionStore";
-import { addMeasure, createDocument, deserializeDocument, ensureInitialTempo, ensureScoreDuration, removeMeasure, removeSystemBreak, repaginateDocument, serializeDocument, setForcedPageBreakBefore, setTimeSignature, setTimeSignatureGridLine, splitSystemAt } from "./model/document";
+import { addMeasure, createDocument, deserializeDocument, ensureInitialTempo, ensureScoreDuration, removeMeasure, removeSystemBreak, repaginateDocument, serializeDocument, setForcedPageBreakBefore, setTimeSignature, setTimeSignatureGridLine, splitSystemAt, type ScoreTemplate } from "./model/document";
 import { createEvent, newId } from "./model/events";
 import { resolveWebSafeFontFamily } from "./model/fonts";
 import { importMidi, parseMidiFile, type MidiHand, type ParsedMidiFile } from "./midiImport";
@@ -205,7 +205,6 @@ function SystemPreview({
   onAuditionNote: (pitch: number, velocity: number) => void;
   playbackTick: number | null;
 }) {
-  const stave = system.staves[0];
   const { measures, groups } = gridBoundaries(document.base_grid, document.time_per_quarter);
   const paperWidth = page.width_mm * PIXELS_PER_MM;
   const paperHeight = page.height_mm * PIXELS_PER_MM;
@@ -213,16 +212,26 @@ function SystemPreview({
   const systemBounds = systemBoundsById.get(system.id)!;
   const staveLeftPositions = centeredStaveLeftPositions(system, document.layout, ...systemBounds);
   const staveBounds = system.staves.map((candidate, index) => staveBoundsMm(system, candidate, document.layout, staveLeftPositions[index], false));
-  const staveLeftMm = staveLeftPositions[0];
-  const inputBounds = staveBoundsMm(system, stave, document.layout, staveLeftMm, false)!;
+  const staveTargets = system.staves.flatMap((candidate, index) => {
+    const bounds = staveBounds[index];
+    if (!bounds) return [];
+    const leftMm = staveLeftPositions[index];
+    const inputLedgers = ledgerLineSegments(system, candidate, document.layout, leftMm);
+    const editableBounds = inputLedgers.reduce<[number, number]>((range, ledger) => [
+      Math.min(range[0], ledger.xMm),
+      Math.max(range[1], ledger.xMm),
+    ], [...bounds]);
+    return [{ stave: candidate, index, bounds, leftMm, semitoneMm: staveSemitoneMm(document.layout, candidate), inputLedgers, editableBounds }];
+  });
+  const primaryStaveTarget = staveTargets[0]!;
+  const stave = primaryStaveTarget.stave;
+  const staveLeftMm = primaryStaveTarget.leftMm;
+  const inputBounds = primaryStaveTarget.bounds;
   const leftmostStaveBound = staveBounds[0] ?? inputBounds;
   const rightmostStaveBound = staveBounds.at(-1) ?? inputBounds;
   const semitoneMm = staveSemitoneMm(document.layout, stave);
-  const inputLedgers = ledgerLineSegments(system, stave, document.layout, staveLeftMm);
-  const editableInputBounds = inputLedgers.reduce<[number, number]>((bounds, ledger) => [
-    Math.min(bounds[0], ledger.xMm),
-    Math.max(bounds[1], ledger.xMm),
-  ], [...inputBounds]);
+  const inputLedgers = primaryStaveTarget.inputLedgers;
+  const editableInputBounds = primaryStaveTarget.editableBounds;
   const mayEditOutsideStaveRange = inputLedgers.length > 0;
   const mmToPixels = (millimetres: number) => millimetres * PIXELS_PER_MM;
   const yAt = (tick: number) => mmToPixels(
@@ -260,12 +269,13 @@ function SystemPreview({
     hand: "left" | "right";
     mode: "move" | "duration";
     noteId: string;
+    staveId: string;
     pointerId: number;
   } | null>(null);
   const countLineDragRef = useRef<{ id: string; part: "start" | "end" | "line"; pointerId: number; startTime: number; startPointerTime: number; startRpitch1: number; startRpitch2: number; startRpitch: number } | null>(null);
   const selectionDragRef = useRef<{ pointerId: number; startX: number; startY: number; startClientX: number; startClientY: number; rightButton: boolean } | null>(null);
   const suppressContextMenuRef = useRef(false);
-  const [inputPreview, setInputPreview] = useState<{ time: number; pitch: number } | null>(null);
+  const [inputPreview, setInputPreview] = useState<{ staveId: string; time: number; pitch: number } | null>(null);
   const [systemBreakTarget, setSystemBreakTarget] = useState<SystemBreakTarget | null>(null);
   const [meterTarget, setMeterTarget] = useState<MeterTarget | null>(null);
   const [hoveredStaveControlId, setHoveredStaveControlId] = useState<string | null>(null);
@@ -313,6 +323,9 @@ function SystemPreview({
     };
   };
 
+  const staveTargetAt = (xMm: number) => staveTargets.find((target) => xMm >= target.bounds[0] && xMm <= target.bounds[1]) ?? null;
+  const staveTargetById = (staveId: string) => staveTargets.find((target) => target.stave.id === staveId) ?? null;
+
   const snapTimeAt = (yMm: number) => Math.max(
     system.start_tick,
     Math.min(
@@ -341,10 +354,10 @@ function SystemPreview({
       && Math.abs(yMm - centerY) <= 4.5;
   })?.id ?? null;
 
-  const locateStave = (editableDocument: KeyTabDocument): [System, Stave] | null => {
+  const locateStave = (editableDocument: KeyTabDocument, staveId = stave.id): [System, Stave] | null => {
     for (const editablePage of editableDocument.pages) {
       const editableSystem = editablePage.systems.find((candidate) => candidate.id === system.id);
-      const editableStave = editableSystem?.staves.find((candidate) => candidate.id === stave.id);
+      const editableStave = editableSystem?.staves.find((candidate) => candidate.id === staveId);
       if (editableSystem && editableStave) return [editableSystem, editableStave];
     }
     return null;
@@ -364,29 +377,31 @@ function SystemPreview({
     return Math.max(system.start_tick, Math.min(system.end_tick, Math.round(time / snapTicks) * snapTicks));
   };
 
-  const noteHitAt = (xMm: number, yMm: number): { note: NoteEvent; part: "head" | "body" } | null => {
-    const bodyHalfWidth = mmToPixels(semitoneMm);
+  const noteHitAt = (xMm: number, yMm: number): { note: NoteEvent; part: "head" | "body"; staveTarget: typeof staveTargets[number] } | null => {
     const xPx = mmToPixels(xMm);
     const yPx = mmToPixels(yMm);
-    for (const candidate of [...stave.events].reverse()) {
-      if (candidate.type !== "note") continue;
-      const noteX = xAtPitch(candidate.pitch);
-      const noteY = yAt(candidate.time);
-      const endY = yAt(Math.min(system.end_tick, candidate.time + candidate.duration));
-      const noteHeight = mmToPixels(semitoneMm * 2 * document.layout.notehead_height_scaling);
-      const candidateNotes = stave.events.filter((event): event is NoteEvent => event.type === "note");
-      const noteHalfWidth = mmToPixels(semitoneMm * document.layout.note_width_scaling * blackKeyWidthScale(candidate.pitch, candidate.time, candidateNotes, document.layout.black_note_rule));
-      const isBlack = isBlackKey(candidate.pitch);
-      const headUp = candidate.notehead === "auto"
-        ? isBlack && document.layout.black_note_rule === "above_stem"
-        : candidate.notehead.endsWith("_up");
-      const headCenterY = (headUp ? noteY - noteHeight : noteY) + noteHeight * 0.5;
-      const headHit = !candidate.continues_from_previous
-        && ((xPx - noteX) / noteHalfWidth) ** 2 + ((yPx - headCenterY) / (noteHeight * 0.5)) ** 2 <= 1;
-      if (headHit) return { note: candidate, part: "head" };
-      const bodyHit = xPx >= noteX - bodyHalfWidth && xPx <= noteX + bodyHalfWidth
-        && yPx >= noteY && yPx <= Math.max(noteY + bodyHalfWidth, endY);
-      if (bodyHit) return { note: candidate, part: "body" };
+    for (const target of [...staveTargets].reverse()) {
+      const candidateNotes = target.stave.events.filter((event): event is NoteEvent => event.type === "note");
+      const candidateScale = document.layout.scale * target.stave.scale;
+      const bodyHalfWidth = mmToPixels(target.semitoneMm);
+      for (const candidate of [...candidateNotes].reverse()) {
+        const noteX = mmToPixels(pitchToXmm(candidate.pitch, target.stave, target.leftMm, document.layout));
+        const noteY = yAt(candidate.time);
+        const endY = yAt(Math.min(system.end_tick, candidate.time + candidate.duration));
+        const noteHeight = mmToPixels(target.semitoneMm * 2 * document.layout.notehead_height_scaling);
+        const noteHalfWidth = mmToPixels(target.semitoneMm * document.layout.note_width_scaling * blackKeyWidthScale(candidate.pitch, candidate.time, candidateNotes, document.layout.black_note_rule));
+        const isBlack = isBlackKey(candidate.pitch);
+        const headUp = candidate.notehead === "auto"
+          ? isBlack && document.layout.black_note_rule === "above_stem"
+          : candidate.notehead.endsWith("_up");
+        const headCenterY = (headUp ? noteY - noteHeight : noteY) + noteHeight * 0.5;
+        const headHit = !candidate.continues_from_previous
+          && ((xPx - noteX) / noteHalfWidth) ** 2 + ((yPx - headCenterY) / (noteHeight * 0.5)) ** 2 <= 1;
+        if (headHit) return { note: candidate, part: "head", staveTarget: target };
+        const bodyHit = xPx >= noteX - bodyHalfWidth && xPx <= noteX + bodyHalfWidth
+          && yPx >= noteY && yPx <= Math.max(noteY + bodyHalfWidth, endY);
+        if (bodyHit) return { note: candidate, part: "body", staveTarget: target };
+      }
     }
     return null;
   };
@@ -553,7 +568,8 @@ function SystemPreview({
     }
     const { xMm, yMm } = pointAt(event);
     const hit = noteHitAt(xMm, yMm);
-    if (!hit && (xMm < editableInputBounds[0] - semitoneMm * 0.5 || xMm > editableInputBounds[1] + semitoneMm * 0.5 || yMm < system.top_mm || yMm > system.top_mm + system.height_mm)) return;
+    const target = hit?.staveTarget ?? staveTargetAt(xMm);
+    if (!target || yMm < system.top_mm || yMm > system.top_mm + system.height_mm) return;
     event.preventDefault();
     setInputPreview(null);
     try {
@@ -563,24 +579,24 @@ function SystemPreview({
     }
     const hand = activeTool;
     if (hit) {
-      dragRef.current = { hand: hit.note.hand, mode: hit.part === "head" ? "move" : "duration", noteId: hit.note.id, pointerId: event.pointerId };
+      dragRef.current = { hand: hit.note.hand, mode: hit.part === "head" ? "move" : "duration", noteId: hit.note.id, staveId: target.stave.id, pointerId: event.pointerId };
       return;
     }
 
     const time = snapTimeAt(yMm);
-  const pitch = nearestStavePitch(stave, document.layout, staveLeftMm, xMm, mayEditOutsideStaveRange);
+    const pitch = nearestStavePitch(target.stave, document.layout, target.leftMm, xMm, target.inputLedgers.length > 0);
     const noteId = createEvent("note").id;
-    dragRef.current = { hand, mode: "duration", noteId, pointerId: event.pointerId };
+    dragRef.current = { hand, mode: "duration", noteId, staveId: target.stave.id, pointerId: event.pointerId };
     onEdit((editableDocument) => {
-      const target = locateStave(editableDocument);
-      if (!target) return;
+      const editableTarget = locateStave(editableDocument, target.stave.id);
+      if (!editableTarget) return;
       const note = createEvent("note") as NoteEvent;
       note.id = noteId;
       note.time = time;
       note.duration = snapTicks;
       note.pitch = pitch;
       note.hand = hand;
-      target[1].events.push(note);
+      editableTarget[1].events.push(note);
     }, `${hand === "left" ? "Left" : "Right"} note added`);
     onAuditionNote(pitch, 100);
   };
@@ -590,20 +606,23 @@ function SystemPreview({
     const { xMm, yMm } = pointAt(event);
     if (!drag || drag.pointerId !== event.pointerId) {
       if (activeTool !== "left" && activeTool !== "right") return;
-      const inInputBounds = xMm >= editableInputBounds[0] && xMm <= editableInputBounds[1]
-        && yMm >= system.top_mm && yMm <= system.top_mm + system.height_mm;
+      const target = staveTargetAt(xMm);
+      const inInputBounds = target && yMm >= system.top_mm && yMm <= system.top_mm + system.height_mm;
       setInputPreview(inInputBounds ? {
+        staveId: target.stave.id,
         time: snapTimeAt(yMm),
-        pitch: nearestStavePitch(stave, document.layout, staveLeftMm, xMm, mayEditOutsideStaveRange),
+        pitch: nearestStavePitch(target.stave, document.layout, target.leftMm, xMm, target.inputLedgers.length > 0),
       } : null);
       return;
     }
-    const nextPitch = drag.mode === "move" ? nearestStavePitch(stave, document.layout, staveLeftMm, xMm, true) : null;
-    const currentPitch = drag.mode === "move" ? stave.events.find((candidate): candidate is NoteEvent => candidate.type === "note" && candidate.id === drag.noteId)?.pitch : null;
+    const target = staveTargetById(drag.staveId);
+    if (!target) return;
+    const nextPitch = drag.mode === "move" ? nearestStavePitch(target.stave, document.layout, target.leftMm, xMm, true) : null;
+    const currentPitch = drag.mode === "move" ? target.stave.events.find((candidate): candidate is NoteEvent => candidate.type === "note" && candidate.id === drag.noteId)?.pitch : null;
     onEdit((editableDocument) => {
-      const target = locateStave(editableDocument);
-      if (!target) return;
-      const note = target[1].events.find((candidate): candidate is NoteEvent => candidate.type === "note" && candidate.id === drag.noteId);
+      const editableTarget = locateStave(editableDocument, drag.staveId);
+      if (!editableTarget) return;
+      const note = editableTarget[1].events.find((candidate): candidate is NoteEvent => candidate.type === "note" && candidate.id === drag.noteId);
       if (!note) return;
       if (drag.mode === "move") {
         note.time = Math.min(snapTimeAt(yMm), system.end_tick - note.duration);
@@ -613,7 +632,7 @@ function SystemPreview({
       const editablePage = editableDocument.pages.find((candidate) => candidate.systems.some((candidateSystem) => candidateSystem.id === system.id));
       const sourceIndex = editablePage?.systems.findIndex((candidate) => candidate.id === system.id) ?? -1;
       const following = sourceIndex >= 0 ? editablePage?.systems[sourceIndex + 1] : undefined;
-      const staveIndex = target[0].staves.findIndex((candidate) => candidate.id === target[1].id);
+      const staveIndex = editableTarget[0].staves.findIndex((candidate) => candidate.id === editableTarget[1].id);
       const followingStave = following?.staves[staveIndex];
       const continuationId = note.continuation_id ?? note.id;
       const nextSamePitchTime = editableDocument.pages
@@ -719,9 +738,51 @@ function SystemPreview({
       (note.continues_from_previous && tick === note.time)
       || (note.time < tick && (tick < note.time + note.duration || (note.continues_to_next && tick === note.time + note.duration)))
     ));
-    return { note, x, start, end, stemTipX, headPath, body, filled, form, headUp, headHalfWidth: halfWidth, isBlackKey: isBlack, stop, dots: dotTicks.map((tick) => [x, yAt(tick) + mmToPixels(semitoneMm)] as const) };
+    return { note, staveId: stave.id, x, start, end, stemTipX, headPath, body, filled, form, headUp, headHalfWidth: halfWidth, isBlackKey: isBlack, stop, noteHeightPx: mmToPixels(noteHeightMm), noteStrokePx, stopStrokePx: mmToPixels(document.layout.note_stopsign_thickness_mm * scale), dotRadiusPx: mmToPixels(document.layout.note_continuation_dot_size_mm * scale) / 2, dots: dotTicks.map((tick) => [x, yAt(tick) + mmToPixels(semitoneMm)] as const) };
   });
+  const additionalNoteGeometries = staveTargets.slice(1).flatMap((target) => {
+    const candidateNotes = target.stave.events.filter((event): event is NoteEvent => event.type === "note");
+    const candidateScale = document.layout.scale * target.stave.scale;
+    const candidateNoteWidthMm = target.semitoneMm * document.layout.note_width_scaling;
+    const candidateNoteHeightMm = target.semitoneMm * 2 * document.layout.notehead_height_scaling;
+    const candidateStemLengthMm = target.semitoneMm * document.layout.note_stem_length_semitone;
+    const candidateNoteStrokePx = mmToPixels(document.layout.note_stem_thickness_mm * candidateScale);
+    return candidateNotes.map((note) => {
+      const x = mmToPixels(pitchToXmm(note.pitch, target.stave, target.leftMm, document.layout));
+      const start = yAt(note.time);
+      const end = yAt(Math.min(system.end_tick, note.time + note.duration));
+      const isBlack = isBlackKey(note.pitch);
+      const headUp = note.notehead === "auto" ? isBlack && document.layout.black_note_rule === "above_stem" : note.notehead.endsWith("_up");
+      const filled = note.notehead === "auto" ? isBlack : note.notehead.includes("black");
+      const form = note.notehead === "auto" ? "circle" : note.notehead.split("_")[0];
+      const halfWidth = mmToPixels(candidateNoteWidthMm * blackKeyWidthScale(note.pitch, note.time, candidateNotes, document.layout.black_note_rule));
+      const noteHeightPx = mmToPixels(candidateNoteHeightMm);
+      const top = headUp ? start - noteHeightPx : start;
+      const centerY = top + noteHeightPx * 0.5;
+      const headPoints = form === "triangle"
+        ? (headUp ? [[x - halfWidth, top], [x + halfWidth, top], [x, top + noteHeightPx]] : [[x, top], [x - halfWidth, top + noteHeightPx], [x + halfWidth, top + noteHeightPx]])
+        : Array.from({ length: 48 }, (_, index) => {
+          const angle = Math.PI * 2 * index / 48;
+          const tilt = (note.hand === "right" ? -1 : 1) * document.layout.notehead_tilt * halfWidth * Math.cos(angle);
+          return [x + halfWidth * Math.cos(angle), centerY + noteHeightPx * 0.5 * Math.sin(angle) + tilt];
+        });
+      const stemTipX = x + (note.hand === "left" ? -1 : 1) * mmToPixels(candidateStemLengthMm);
+      const bodyHalfWidth = mmToPixels(target.semitoneMm);
+      const body = [[x, start], [x - bodyHalfWidth, start + bodyHalfWidth], [x - bodyHalfWidth, end], [x + bodyHalfWidth, end], [x + bodyHalfWidth, start + bodyHalfWidth]];
+      const nextSameHand = candidateNotes.some((candidate) => candidate.id !== note.id && candidate.hand === note.hand && time.eq(candidate.time, note.time + note.duration));
+      const stop = !note.continues_to_next && !nextSameHand ? [[x - bodyHalfWidth, end - noteHeightPx], [x, end], [x + bodyHalfWidth, end - noteHeightPx]] : null;
+      const dotTicks = [...new Set([
+        ...measures,
+        ...candidateNotes.filter((candidate) => candidate.hand === note.hand).flatMap((candidate) => [candidate.time, candidate.time + candidate.duration]),
+        ...(note.continues_from_previous ? [note.time] : []),
+        ...(note.continues_to_next ? [note.time + note.duration] : []),
+      ])].filter((tick) => (note.continues_from_previous && tick === note.time) || (note.time < tick && (tick < note.time + note.duration || (note.continues_to_next && tick === note.time + note.duration))));
+      return { note, staveId: target.stave.id, x, start, end, stemTipX, headPath: `M ${headPoints.map(([pointX, pointY]) => `${pointX} ${pointY}`).join(" L ")} Z`, body, filled, form, headUp, headHalfWidth: halfWidth, isBlackKey: isBlack, stop, noteHeightPx, noteStrokePx: candidateNoteStrokePx, stopStrokePx: mmToPixels(document.layout.note_stopsign_thickness_mm * candidateScale), dotRadiusPx: mmToPixels(document.layout.note_continuation_dot_size_mm * candidateScale) / 2, dots: dotTicks.map((tick) => [x, yAt(tick) + bodyHalfWidth] as const) };
+    });
+  });
+  const renderedNoteGeometries = [...noteGeometries, ...additionalNoteGeometries];
   const noteGeometriesInPaintOrder = [...noteGeometries].sort((first, second) => Number(first.isBlackKey) - Number(second.isBlackKey));
+  const renderedNoteGeometriesInPaintOrder = [...renderedNoteGeometries].sort((first, second) => Number(first.isBlackKey) - Number(second.isBlackKey));
   const countLines = stave.events.filter((event): event is CountLineEvent => event.type === "count_line");
   const countLineRpitchAt = (xMm: number) => Math.round((xMm - pitchToXmm(60, stave, staveLeftMm, document.layout)) / semitoneMm);
   const countLineTargetAt = (xMm: number, yMm: number): { line: CountLineEvent; part: "start" | "end" | "line" } | null => {
@@ -802,56 +863,76 @@ function SystemPreview({
     return true;
   };
   const previewGeometry = inputPreview && (activeTool === "left" || activeTool === "right") ? (() => {
+    const target = staveTargetById(inputPreview.staveId);
+    if (!target) return null;
     const { time: previewTime, pitch } = inputPreview;
-    const x = xAtPitch(pitch);
+    const previewNotes = target.stave.events.filter((event): event is NoteEvent => event.type === "note");
+    const previewScale = document.layout.scale * target.stave.scale;
+    const previewNoteWidthMm = target.semitoneMm * document.layout.note_width_scaling;
+    const previewNoteHeightMm = target.semitoneMm * 2 * document.layout.notehead_height_scaling;
+    const previewStemLengthMm = target.semitoneMm * document.layout.note_stem_length_semitone;
+    const x = mmToPixels(pitchToXmm(pitch, target.stave, target.leftMm, document.layout));
     const start = yAt(previewTime);
     const end = yAt(Math.min(system.end_tick, previewTime + snapTicks));
     const isBlack = isBlackKey(pitch);
     const headUp = isBlack && document.layout.black_note_rule === "above_stem";
-    const top = headUp ? start - mmToPixels(noteHeightMm) : start;
-    const centerY = top + mmToPixels(noteHeightMm) * 0.5;
-    const halfWidth = mmToPixels(noteWidthMm * blackKeyWidthScale(pitch, previewTime, notes, document.layout.black_note_rule));
-    const height = mmToPixels(noteHeightMm);
+    const height = mmToPixels(previewNoteHeightMm);
+    const top = headUp ? start - height : start;
+    const centerY = top + height * 0.5;
+    const halfWidth = mmToPixels(previewNoteWidthMm * blackKeyWidthScale(pitch, previewTime, previewNotes, document.layout.black_note_rule));
     const headPoints = Array.from({ length: 48 }, (_, index) => {
       const angle = Math.PI * 2 * index / 48;
       const tilt = (activeTool === "right" ? -1 : 1) * document.layout.notehead_tilt * halfWidth * Math.cos(angle);
       return [x + halfWidth * Math.cos(angle), centerY + height * 0.5 * Math.sin(angle) + tilt];
     });
-    const dotTicks = [...new Set([...measures, ...notes.filter((note) => note.hand === activeTool).flatMap((note) => [note.time, note.time + note.duration])])]
+    const dotTicks = [...new Set([...measures, ...previewNotes.filter((note) => note.hand === activeTool).flatMap((note) => [note.time, note.time + note.duration])])]
       .filter((tick) => previewTime < tick && tick < previewTime + snapTicks);
-    const midiHalfWidth = mmToPixels(semitoneMm);
+    const midiHalfWidth = mmToPixels(target.semitoneMm);
     return {
       x,
       start,
       end,
-      stemTipX: x + (activeTool === "left" ? -1 : 1) * mmToPixels(stemLengthMm),
+      stemTipX: x + (activeTool === "left" ? -1 : 1) * mmToPixels(previewStemLengthMm),
       isBlackKey: isBlack,
       headPath: `M ${headPoints.map(([pointX, pointY]) => `${pointX} ${pointY}`).join(" L ")} Z`,
-      body: [[x, start], [x - mmToPixels(semitoneMm), start + mmToPixels(semitoneMm)], [x - mmToPixels(semitoneMm), end], [x + mmToPixels(semitoneMm), end], [x + mmToPixels(semitoneMm), start + mmToPixels(semitoneMm)]],
+      body: [[x, start], [x - midiHalfWidth, start + midiHalfWidth], [x - midiHalfWidth, end], [x + midiHalfWidth, end], [x + midiHalfWidth, start + midiHalfWidth]],
       stop: [[x - midiHalfWidth, end - height], [x, end], [x + midiHalfWidth, end - height]],
-      dots: dotTicks.map((tick) => [x, yAt(tick) + mmToPixels(semitoneMm)] as const),
+      dotRadiusPx: mmToPixels(document.layout.note_continuation_dot_size_mm * previewScale) / 2,
+      noteStrokePx: mmToPixels(document.layout.note_stem_thickness_mm * previewScale),
+      stopStrokePx: mmToPixels(document.layout.note_stopsign_thickness_mm * previewScale),
+      dots: dotTicks.map((tick) => [x, yAt(tick) + midiHalfWidth] as const),
     };
   })() : null;
-  const ledgers = ledgerLineSegments(
-    system,
-    stave,
-    document.layout,
-    staveLeftMm,
-    new Map(noteGeometries.map((geometry) => [
-      geometry.note.id,
-      [...geometry.dots.map(([, y]) => y / PIXELS_PER_MM), ...(geometry.stop ? [geometry.stop[1][1] / PIXELS_PER_MM] : [])],
-    ])),
-  );
+  const ledgers = staveTargets.flatMap((target) => {
+    const targetGeometries = renderedNoteGeometries.filter((geometry) => geometry.staveId === target.stave.id);
+    return ledgerLineSegments(
+      system,
+      target.stave,
+      document.layout,
+      target.leftMm,
+      new Map(targetGeometries.map((geometry) => [
+        geometry.note.id,
+        [...geometry.dots.map(([, y]) => y / PIXELS_PER_MM), ...(geometry.stop ? [geometry.stop[1][1] / PIXELS_PER_MM] : [])],
+      ])),
+    ).map((ledger) => ({ ...ledger, staveId: target.stave.id }));
+  });
   const chordConnectors = ["left", "right"].flatMap((hand) => {
-    const remaining = noteGeometries.filter((geometry) => geometry.note.hand === hand);
-    const groups: typeof noteGeometries[] = [];
+    const remaining = renderedNoteGeometries.filter((geometry) => geometry.note.hand === hand);
+    const connectors: { staveId: string; tick: number; x1: number; y: number; x2: number; strokeWidth: number }[] = [];
     while (remaining.length) {
       const first = remaining.shift()!;
-      const group = [first, ...remaining.filter((geometry) => time.eq(geometry.note.time, first.note.time))];
+      const group = [first, ...remaining.filter((geometry) => geometry.staveId === first.staveId && time.eq(geometry.note.time, first.note.time))];
       for (const geometry of group.slice(1)) remaining.splice(remaining.indexOf(geometry), 1);
-      groups.push(group);
+      if (group.length >= 2) connectors.push({
+        staveId: first.staveId,
+        tick: first.note.time,
+        x1: Math.min(...group.map((geometry) => geometry.x)),
+        y: first.start,
+        x2: Math.max(...group.map((geometry) => geometry.x)),
+        strokeWidth: first.noteStrokePx,
+      });
     }
-    return groups.flatMap((group) => group.length < 2 ? [] : [[Math.min(...group.map((geometry) => geometry.x)), group[0].start, Math.max(...group.map((geometry) => geometry.x)), group[0].start] as const]);
+    return connectors;
   });
   const explicitBeams = stave.events.filter((event) => event.type === "beam");
   const automaticBeams = applyBeamOverrides(
@@ -890,6 +971,9 @@ function SystemPreview({
       intervals.push([geometry.x - headWidth, geometry.x + headWidth]);
       intervals.push([Math.min(geometry.x, geometry.stemTipX) - padding, Math.max(geometry.x, geometry.stemTipX) + padding]);
     }
+    chordConnectors
+      .filter((connector) => connector.staveId === stave.id && time.eq(connector.tick, tick))
+      .forEach((connector) => intervals.push([connector.x1 - padding, connector.x2 + padding]));
     for (const beam of beamGeometries) {
       if (!time.ge(tick, beam.startTick) || !time.le(tick, beam.endTick)) continue;
       const ratio = (tick - beam.startTick) / (beam.endTick - beam.startTick);
@@ -921,6 +1005,66 @@ function SystemPreview({
       cursor = Math.max(cursor, end);
     });
     if (cursor < right) segments.push(<line key="after" x1={cursor} x2={right} y1={y} y2={y} className={className} stroke={stroke} strokeWidth={strokeWidth} strokeDasharray={strokeDasharray} />);
+    return segments;
+  };
+  const segmentedStaveLine = (tick: number, bounds: [number, number], staveId: string, keyPrefix: string, className: string, strokeWidth?: number, stroke?: string, strokeDasharray?: string) => {
+    const padding = mmToPixels(2 * document.layout.scale);
+    const cuts = renderedNoteGeometries
+      .filter((geometry) => geometry.staveId === staveId && time.eq(geometry.note.time, tick))
+      .flatMap((geometry) => [
+        [geometry.x - geometry.headHalfWidth - padding, geometry.x + geometry.headHalfWidth + padding] as [number, number],
+        [Math.min(geometry.x, geometry.stemTipX) - padding, Math.max(geometry.x, geometry.stemTipX) + padding] as [number, number],
+        ...chordConnectors
+          .filter((connector) => connector.staveId === staveId && time.eq(connector.tick, tick))
+          .map((connector) => [connector.x1 - padding, connector.x2 + padding] as [number, number]),
+      ])
+      .map(([start, end]) => [Math.max(mmToPixels(bounds[0]), start), Math.min(mmToPixels(bounds[1]), end)] as [number, number])
+      .filter(([start, end]) => end > start)
+      .sort(([left], [right]) => left - right);
+    const y = yAt(tick);
+    const left = mmToPixels(bounds[0]);
+    const right = mmToPixels(bounds[1]);
+    let cursor = left;
+    const segments: ReactNode[] = [];
+    cuts.forEach(([start, end], index) => {
+      if (start > cursor) segments.push(<line key={`${keyPrefix}-before-${index}`} x1={cursor} x2={start} y1={y} y2={y} className={className} stroke={stroke} strokeWidth={strokeWidth} strokeDasharray={strokeDasharray} />);
+      cursor = Math.max(cursor, end);
+    });
+    if (cursor < right) segments.push(<line key={`${keyPrefix}-after`} x1={cursor} x2={right} y1={y} y2={y} className={className} stroke={stroke} strokeWidth={strokeWidth} strokeDasharray={strokeDasharray} />);
+    return segments;
+  };
+  const segmentedBarlineConnector = (tick: number, bounds: [number, number], keyPrefix: string, className: string, strokeWidth?: number) => {
+    const padding = mmToPixels(2 * document.layout.scale);
+    const cuts = [
+      ...renderedNoteGeometries
+        .filter((geometry) => time.eq(geometry.note.time, tick))
+        .flatMap((geometry) => [
+          [geometry.x - geometry.headHalfWidth - padding, geometry.x + geometry.headHalfWidth + padding] as [number, number],
+          [Math.min(geometry.x, geometry.stemTipX) - padding, Math.max(geometry.x, geometry.stemTipX) + padding] as [number, number],
+        ]),
+      ...chordConnectors
+        .filter((connector) => time.eq(connector.tick, tick))
+        .map((connector) => [connector.x1 - padding, connector.x2 + padding] as [number, number]),
+    ]
+      .map(([start, end]) => [Math.max(mmToPixels(bounds[0]), start), Math.min(mmToPixels(bounds[1]), end)] as [number, number])
+      .filter(([start, end]) => end > start)
+      .sort(([left], [right]) => left - right)
+      .reduce<[number, number][]>((merged, interval) => {
+        const previous = merged.at(-1);
+        if (previous && interval[0] <= previous[1]) previous[1] = Math.max(previous[1], interval[1]);
+        else merged.push(interval);
+        return merged;
+      }, []);
+    const left = mmToPixels(bounds[0]);
+    const right = mmToPixels(bounds[1]);
+    const y = yAt(tick);
+    let cursor = left;
+    const segments: ReactNode[] = [];
+    cuts.forEach(([start, end], index) => {
+      if (start > cursor) segments.push(<line key={`${keyPrefix}-before-${index}`} x1={cursor} x2={start} y1={y} y2={y} className={className} strokeWidth={strokeWidth} />);
+      cursor = Math.max(cursor, end);
+    });
+    if (cursor < right) segments.push(<line key={`${keyPrefix}-after`} x1={cursor} x2={right} y1={y} y2={y} className={className} strokeWidth={strokeWidth} />);
     return segments;
   };
   const dashPatternPixels = (values: readonly number[], patternScale = 1) => {
@@ -1050,7 +1194,7 @@ function SystemPreview({
         const bounds = staveBounds[index + 1];
         if (!bounds) return [];
         const candidateScale = document.layout.scale * candidate.scale;
-        return visibleGroups.map((tick) => <line key={`stave-${index + 1}-grid-${tick}`} x1={mmToPixels(bounds[0])} x2={mmToPixels(bounds[1])} y1={yAt(tick)} y2={yAt(tick)} className="grid-line" strokeWidth={mmToPixels(document.layout.grid_gridline_thickness_mm * candidateScale)} strokeDasharray={dashPatternPixels(document.layout.grid_gridline_dash_pattern_mm, candidateScale)} />);
+        return visibleGroups.flatMap((tick) => segmentedStaveLine(tick, bounds, candidate.id, `stave-${index + 1}-grid-${tick}`, "grid-line", mmToPixels(document.layout.grid_gridline_thickness_mm * candidateScale), undefined, dashPatternPixels(document.layout.grid_gridline_dash_pattern_mm, candidateScale)));
       })}
     </> : null,
     barlines: document.layout.barline_visible ? <>
@@ -1061,15 +1205,15 @@ function SystemPreview({
         const candidateScale = document.layout.scale * candidate.scale;
         if (!bounds) return [];
         return [
-          ...visibleMeasures.map((tick) => fullStaveLine(tick, bounds, `stave-${index + 1}-measure-${tick}`, "measure-line", mmToPixels(document.layout.grid_barline_thickness_mm * candidateScale))),
-          fullStaveLine(system.end_tick, bounds, `stave-${index + 1}-end`, isFinalSystem ? "end-barline" : "measure-line", mmToPixels(document.layout.grid_barline_thickness_mm * candidateScale * (isFinalSystem ? 3 : 1))),
+          ...visibleMeasures.flatMap((tick) => segmentedStaveLine(tick, bounds, candidate.id, `stave-${index + 1}-measure-${tick}`, "measure-line", mmToPixels(document.layout.grid_barline_thickness_mm * candidateScale))),
+          ...segmentedStaveLine(system.end_tick, bounds, candidate.id, `stave-${index + 1}-end`, isFinalSystem ? "end-barline" : "measure-line", mmToPixels(document.layout.grid_barline_thickness_mm * candidateScale * (isFinalSystem ? 3 : 1))),
         ];
       })}
-      {[...new Set([...visibleMeasures, system.end_tick])].flatMap((tick) => staveBounds.slice(0, -1).map((leftBounds, index) => {
+      {[...new Set([...visibleMeasures, system.end_tick])].flatMap((tick) => staveBounds.slice(0, -1).flatMap((leftBounds, index) => {
         const rightBounds = staveBounds[index + 1];
-        if (!leftBounds || !rightBounds) return null;
+        if (!leftBounds || !rightBounds) return [];
         const connectorScale = Math.max(system.staves[index].scale, system.staves[index + 1].scale) * document.layout.scale;
-        return <line key={`connector-${tick}-${index}`} x1={mmToPixels(leftBounds[1])} x2={mmToPixels(rightBounds[0])} y1={yAt(tick)} y2={yAt(tick)} className={tick === system.end_tick && isFinalSystem ? "end-barline" : "measure-line"} strokeWidth={tick === system.end_tick && isFinalSystem ? mmToPixels(document.layout.grid_barline_thickness_mm * connectorScale * 3) : undefined} />;
+        return segmentedBarlineConnector(tick, [leftBounds[1], rightBounds[0]], `connector-${tick}-${index}`, tick === system.end_tick && isFinalSystem ? "end-barline" : "measure-line", tick === system.end_tick && isFinalSystem ? mmToPixels(document.layout.grid_barline_thickness_mm * connectorScale * 3) : undefined);
       }))}
     </> : null,
     stave_lines: document.layout.stave_visible ? system.staves.flatMap((candidate, index) => naturalLinePitches(candidate).map((pitch) => {
@@ -1078,7 +1222,7 @@ function SystemPreview({
       return <line key={`${candidate.id}-${pitch}`} x1={x} x2={x} y1={mmToPixels(system.top_mm)} y2={mmToPixels(system.top_mm + system.height_mm)} className="stave-line" style={{ strokeWidth: mmToPixels(style.widthMm), strokeDasharray: dashPatternPixels(style.dashMm) }} />;
     })) : null,
     ledger_lines: document.layout.stave_visible ? ledgers.map((ledger) => (
-      <line key={`${ledger.pitch}-${ledger.startYmm}`} x1={mmToPixels(ledger.xMm)} x2={mmToPixels(ledger.xMm)} y1={mmToPixels(ledger.startYmm)} y2={mmToPixels(ledger.endYmm)} className={ledger.midiOnly ? "stave-line ledger-line midi-ledger" : "stave-line ledger-line"} style={{ strokeWidth: mmToPixels(ledger.widthMm), strokeDasharray: dashPatternPixels(ledger.dashMm) }} />
+      <line key={`${ledger.staveId}-${ledger.pitch}-${ledger.startYmm}`} x1={mmToPixels(ledger.xMm)} x2={mmToPixels(ledger.xMm)} y1={mmToPixels(ledger.startYmm)} y2={mmToPixels(ledger.endYmm)} className={ledger.midiOnly ? "stave-line ledger-line midi-ledger" : "stave-line ledger-line"} style={{ strokeWidth: mmToPixels(ledger.widthMm), strokeDasharray: dashPatternPixels(ledger.dashMm) }} />
     )) : null,
     time_signature: document.layout.time_signature_visible ? timeSignatures.flatMap(({ grid, startTick }) => {
       const measureEndTick = Math.min(system.end_tick, startTick + grid.numerator * document.time_per_quarter * 4 / grid.denominator);
@@ -1147,27 +1291,27 @@ function SystemPreview({
       return <g key={line.id} className="count-line"><line x1={Math.min(startX, endX)} x2={Math.max(startX, endX)} y1={y} y2={y} stroke="var(--notation-color)" strokeWidth={mmToPixels(document.layout.countline_thickness_mm * scale)} strokeDasharray={dashPatternPixels(document.layout.countline_dash_pattern, scale)} />{activeTool === "count_line" && <><rect fill="var(--accent)" x={startX - handleSize / 2} y={y - handleSize / 2} width={handleSize} height={handleSize} /><rect fill="var(--accent)" x={endX - handleSize / 2} y={y - handleSize / 2} width={handleSize} height={handleSize} /></>}</g>;
     }) : null,
     midi_body: document.layout.note_midinote_visible ? <>
-      {noteGeometriesInPaintOrder.map((geometry) => {
+      {renderedNoteGeometriesInPaintOrder.map((geometry) => {
         const bodyPath = `M ${geometry.body.map(([pointX, pointY]) => `${pointX} ${pointY}`).join(" L ")} Z`;
         const bodyColor = selectedNoteIds.has(geometry.note.id) ? "var(--accent)" : geometry.note.color === "auto" ? (geometry.note.hand === "left" ? document.layout.note_midinote_left_color : document.layout.note_midinote_right_color) : geometry.note.color;
         return <path key={geometry.note.id} d={bodyPath} fill={bodyColor} />;
       })}
     </> : null,
     notes: <>
-      {noteGeometries.map((geometry) => {
+      {renderedNoteGeometries.map((geometry) => {
         const stopPath = geometry.stop ? `M ${geometry.stop.map(([pointX, pointY]) => `${pointX} ${pointY}`).join(" L ")}` : null;
         const selected = selectedNoteIds.has(geometry.note.id);
         const notationColor = selected ? "var(--accent)" : "var(--notation-color)";
         return (
           <g key={geometry.note.id} className={`score-note ${geometry.note.hand}`}>
-            {document.layout.note_head_visible && !geometry.note.continues_from_previous && (geometry.form === "cross" ? <path d={`M ${geometry.x - geometry.headHalfWidth} ${geometry.start} L ${geometry.x + geometry.headHalfWidth} ${geometry.start + mmToPixels(noteHeightMm)} M ${geometry.x + geometry.headHalfWidth} ${geometry.start} L ${geometry.x - geometry.headHalfWidth} ${geometry.start + mmToPixels(noteHeightMm)}`} className="note-outline" style={{ stroke: notationColor }} /> : <path d={geometry.headPath} style={{ fill: selected ? "var(--accent)" : geometry.filled ? "var(--notation-color)" : "#fffefa", stroke: notationColor }} className={`note-outline ${geometry.filled ? "black-notehead" : "white-notehead"}`} />)}
-            {document.layout.note_stem_visible && <line x1={geometry.x} y1={geometry.start} x2={geometry.stemTipX} y2={geometry.start} className="note-stem" style={{ stroke: notationColor }} strokeWidth={noteStrokePx} />}
-            {document.layout.note_stop_visible && stopPath && <path d={stopPath} className="note-stop" strokeWidth={mmToPixels(document.layout.note_stopsign_thickness_mm * scale)} />}
-            {document.layout.note_continuation_dot_visible && geometry.dots.map(([dotX, dotY], index) => <circle key={index} cx={dotX} cy={dotY} r={mmToPixels(document.layout.note_continuation_dot_size_mm * scale) / 2} className="continuation-dot" />)}
+            {document.layout.note_head_visible && !geometry.note.continues_from_previous && (geometry.form === "cross" ? <path d={`M ${geometry.x - geometry.headHalfWidth} ${geometry.start} L ${geometry.x + geometry.headHalfWidth} ${geometry.start + geometry.noteHeightPx} M ${geometry.x + geometry.headHalfWidth} ${geometry.start} L ${geometry.x - geometry.headHalfWidth} ${geometry.start + geometry.noteHeightPx}`} className="note-outline" style={{ stroke: notationColor }} /> : <path d={geometry.headPath} style={{ fill: selected ? "var(--accent)" : geometry.filled ? "var(--notation-color)" : "#fffefa", stroke: notationColor }} className={`note-outline ${geometry.filled ? "black-notehead" : "white-notehead"}`} />)}
+            {document.layout.note_stem_visible && <line x1={geometry.x} y1={geometry.start} x2={geometry.stemTipX} y2={geometry.start} className="note-stem" style={{ stroke: notationColor }} strokeWidth={geometry.noteStrokePx} />}
+            {document.layout.note_stop_visible && stopPath && <path d={stopPath} className="note-stop" strokeWidth={geometry.stopStrokePx} />}
+            {document.layout.note_continuation_dot_visible && geometry.dots.map(([dotX, dotY], index) => <circle key={index} cx={dotX} cy={dotY} r={geometry.dotRadiusPx} className="continuation-dot" />)}
           </g>
         );
       })}
-      {chordConnectors.map(([x1, y1, x2, y2], index) => <line key={index} x1={x1} y1={y1} x2={x2} y2={y2} className="note-stem" strokeWidth={noteStrokePx} />)}
+      {chordConnectors.map((connector) => <line key={`${connector.staveId}-${connector.tick}-${connector.x1}-${connector.x2}`} x1={connector.x1} y1={connector.y} x2={connector.x2} y2={connector.y} className="note-stem" strokeWidth={connector.strokeWidth} />)}
     </>,
     beams: document.layout.beam_visible ? beamGeometries.map((beam) => (
       <g key={beam.id} className="beam">
@@ -1213,10 +1357,10 @@ function SystemPreview({
     </g> : null,
     input_overlay: previewGeometry ? <g className="note-input-preview" data-export="exclude">
       {document.layout.note_midinote_visible && <path d={`M ${previewGeometry.body.map(([pointX, pointY]) => `${pointX} ${pointY}`).join(" L ")} Z`} />}
-      {document.layout.note_head_visible && <path d={previewGeometry.headPath} className="note-input-preview-head" style={{ fill: previewGeometry.isBlackKey ? "#000" : "none", stroke: "#000" }} strokeWidth={noteStrokePx} />}
-      {document.layout.note_stem_visible && <line x1={previewGeometry.x} y1={previewGeometry.start} x2={previewGeometry.stemTipX} y2={previewGeometry.start} stroke="#000" strokeWidth={noteStrokePx} />}
-      {document.layout.note_stop_visible && <path d={`M ${previewGeometry.stop.map(([pointX, pointY]) => `${pointX} ${pointY}`).join(" L ")}`} fill="none" strokeWidth={mmToPixels(document.layout.note_stopsign_thickness_mm * scale)} />}
-      {document.layout.note_continuation_dot_visible && previewGeometry.dots.map(([x, y], index) => <circle key={index} cx={x} cy={y} r={mmToPixels(document.layout.note_continuation_dot_size_mm * scale) / 2} />)}
+      {document.layout.note_head_visible && <path d={previewGeometry.headPath} className="note-input-preview-head" style={{ fill: previewGeometry.isBlackKey ? "#000" : "none", stroke: "#000" }} strokeWidth={previewGeometry.noteStrokePx} />}
+      {document.layout.note_stem_visible && <line x1={previewGeometry.x} y1={previewGeometry.start} x2={previewGeometry.stemTipX} y2={previewGeometry.start} stroke="#000" strokeWidth={previewGeometry.noteStrokePx} />}
+      {document.layout.note_stop_visible && <path d={`M ${previewGeometry.stop.map(([pointX, pointY]) => `${pointX} ${pointY}`).join(" L ")}`} fill="none" strokeWidth={previewGeometry.stopStrokePx} />}
+      {document.layout.note_continuation_dot_visible && previewGeometry.dots.map(([x, y], index) => <circle key={index} cx={x} cy={y} r={previewGeometry.dotRadiusPx} />)}
     </g> : null,
     page_number: null,
   };
@@ -1634,8 +1778,8 @@ export default function App() {
     }, `${selectedSystems.reduce((total, { notes }) => total + notes.length, 0)} selected note${selectedSystems.reduce((total, { notes }) => total + notes.length, 0) === 1 ? "" : "s"} moved ${ticks > 0 ? "forward" : "backward"}`);
   };
 
-  const createNewDocument = () => {
-    const nextDocument = createDocument(loadDefaultLayoutTemplate());
+  const createNewDocument = (template?: ScoreTemplate) => {
+    const nextDocument = createDocument(loadDefaultLayoutTemplate(), template);
     undoStackRef.current = [];
     redoStackRef.current = [];
     desktopFilePathRef.current = null;
@@ -1646,7 +1790,7 @@ export default function App() {
     setDocument(nextDocument);
     setFileName("Untitled.ktw");
     setPageIndex(0);
-    setStatus("New score");
+    setStatus(template ? `New ${template} template` : "New score");
   };
 
   const undoDocument = () => {
@@ -2149,8 +2293,8 @@ export default function App() {
     });
   }, [isDirty]);
 
-  const requestNewDocument = async () => {
-    if (await confirmDiscardChanges("creating a new score")) createNewDocument();
+  const requestNewDocument = async (template?: ScoreTemplate) => {
+    if (await confirmDiscardChanges("creating a new score")) createNewDocument(template);
   };
 
   const exportPdf = async () => {
@@ -2187,6 +2331,8 @@ export default function App() {
   const selectMenuItem = (item: string) => {
     setActiveMenu(null);
     if (item === "New") void requestNewDocument();
+    else if (item === "New Piano Template") void requestNewDocument("piano");
+    else if (item === "New Organ Template") void requestNewDocument("organ");
     else if (item === "Open...") void openScore();
     else if (item === "Import MIDI...") midiInputRef.current?.click();
     else if (item === "Save") void saveDocument();
@@ -2219,7 +2365,7 @@ export default function App() {
   };
 
   const menuItems: Record<string, string[]> = {
-    File: ["New", "Open...", "Import MIDI...", "Save", "Save As...", "Export PDF...", "Set current file as default template", "Reset Default template"],
+    File: ["New", "New Piano Template", "New Organ Template", "---", "Open...", "Import MIDI...", "Save", "Save As...", "Export PDF...", "---", "Set current file as default template", "Reset Default template"],
     Edit: ["Score Info...", "Style...", "Preferences...", "Undo", "Redo"],
     View: ["Snap Band"],
     Help: ["Manual...", "About keyTAB"],
@@ -2240,7 +2386,9 @@ export default function App() {
             <button type="button" className="menu-button" onClick={() => setActiveMenu(activeMenu === menu ? null : menu)}>{menu}</button>
             {activeMenu === menu && (
               <div className="menu-popover">
-                {menuItems[menu].map((item) => <button type="button" key={item} onClick={() => selectMenuItem(item)}>{item}</button>)}
+                {menuItems[menu].map((item, index) => item === "---"
+                  ? <hr key={`${menu}-separator-${index}`} />
+                  : <button type="button" key={item} onClick={() => selectMenuItem(item)}>{item}</button>)}
               </div>
             )}
           </div>
