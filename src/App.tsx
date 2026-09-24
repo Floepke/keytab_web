@@ -157,6 +157,18 @@ function documentFileName(document: KeyTabDocument): string {
   return `${safeTitle}.ktw`;
 }
 
+type DiscardChoice = "save" | "discard" | "cancel";
+
+function DiscardChangesDialog({ action, onChoose }: { action: string; onChoose: (choice: DiscardChoice) => void }) {
+  return <div className="dialog-backdrop" role="presentation" onMouseDown={() => onChoose("cancel")}>
+    <section className="score-info-dialog" role="dialog" aria-modal="true" aria-label="Unsaved changes" onMouseDown={(event) => event.stopPropagation()}>
+      <header><h2>Unsaved Changes</h2><button type="button" aria-label="Cancel" onClick={() => onChoose("cancel")}>x</button></header>
+      <div className="score-info-body"><p className="stave-dialog-copy">Save changes before {action}?</p></div>
+      <footer><button type="button" onClick={() => onChoose("cancel")}>Cancel</button><button type="button" onClick={() => onChoose("discard")}>Don't Save</button><button type="button" className="primary" onClick={() => onChoose("save")}>Save</button></footer>
+    </section>
+  </div>;
+}
+
 function SystemPreview({
   document,
   page,
@@ -694,8 +706,15 @@ function SystemPreview({
     const nextSameHand = notes.some((candidate) => candidate.id !== note.id && candidate.hand === note.hand && time.eq(candidate.time, note.time + note.duration));
     const midiHalfWidth = mmToPixels(semitoneMm);
     const stop = !note.continues_to_next && !nextSameHand ? [[x - midiHalfWidth, end - height], [x, end], [x + midiHalfWidth, end - height]] : null;
-    const dotTicks = [...new Set([...measures, ...notes.filter((candidate) => candidate.hand === note.hand).flatMap((candidate) => [candidate.time, candidate.time + candidate.duration])])]
-      .filter((tick) => note.time < tick && tick < note.time + note.duration);
+    const dotTicks = [...new Set([
+      ...measures,
+      ...notes.filter((candidate) => candidate.hand === note.hand).flatMap((candidate) => [candidate.time, candidate.time + candidate.duration]),
+      ...(note.continues_from_previous ? [note.time] : []),
+      ...(note.continues_to_next ? [note.time + note.duration] : []),
+    ])].filter((tick) => (
+      (note.continues_from_previous && tick === note.time)
+      || (note.time < tick && (tick < note.time + note.duration || (note.continues_to_next && tick === note.time + note.duration)))
+    ));
     return { note, x, start, end, stemTipX, headPath, body, filled, form, headUp, headHalfWidth: halfWidth, isBlackKey: isBlack, stop, dots: dotTicks.map((tick) => [x, yAt(tick) + mmToPixels(semitoneMm)] as const) };
   });
   const noteGeometriesInPaintOrder = [...noteGeometries].sort((first, second) => Number(first.isBlackKey) - Number(second.isBlackKey));
@@ -1169,7 +1188,7 @@ function PaperPreview({ document, pageIndex, activeTool, snapTicks, onEdit, onOp
         event.stopPropagation();
       }}
     >
-      <g className="svg-layer svg-layer-page_background"><rect width={paperWidth} height={paperHeight} fill="#fffefa" /></g>
+      <g className="svg-layer svg-layer-page_background"><rect width={paperWidth} height={paperHeight} fill="#f4f0f0" /></g>
       {pageIndex === 0 && <g className="score-metadata">
         <text x={titleX} y={titleY} dominantBaseline="hanging" className="score-title" style={{ fontFamily: resolveWebSafeFontFamily(document.layout.font_title.family), fontSize: metadataFontSize(document.layout.font_title.size_pt), fontWeight: document.layout.font_title.bold ? 700 : 400, fontStyle: document.layout.font_title.italic ? "italic" : "normal", textDecoration: document.layout.font_title.underline ? "underline" : "none" }}>{title}</text>
         {composer && <text x={composerX} y={titleY} textAnchor="end" dominantBaseline="hanging" className="score-composer" style={{ fontFamily: resolveWebSafeFontFamily(document.layout.font_composer.family), fontSize: metadataFontSize(document.layout.font_composer.size_pt), fontWeight: document.layout.font_composer.bold ? 700 : 400, fontStyle: document.layout.font_composer.italic ? "italic" : "normal", textDecoration: document.layout.font_composer.underline ? "underline" : "none" }}>{composer}</text>}
@@ -1193,6 +1212,7 @@ export default function App() {
   const [sessionReady, setSessionReady] = useState(false);
   const [scoreInfoDialogOpen, setScoreInfoDialogOpen] = useState(false);
   const [styleDialogOpen, setStyleDialogOpen] = useState(false);
+  const [discardPrompt, setDiscardPrompt] = useState<{ action: string; resolve: (choice: DiscardChoice) => void } | null>(null);
   const [midiImport, setMidiImport] = useState<{ parsed: ParsedMidiFile; title: string; sourceName: string } | null>(null);
   const [tempoEdit, setTempoEdit] = useState<TempoEditTarget | null>(null);
   const [timeSignatureEdit, setTimeSignatureEdit] = useState<TimeSignatureEditTarget | null>(null);
@@ -1866,17 +1886,28 @@ export default function App() {
       setStatus(`Could not save score: ${message}`);
       return false;
     }
+    let downloadName = saveName;
+    if (saveAs || fileName === "Untitled.ktw") {
+      const enteredName = window.prompt("Save score as:", saveName);
+      if (enteredName === null) return false;
+      const normalizedName = enteredName.trim().replace(/[\\/:*?"<>|]/g, "_");
+      if (!normalizedName) {
+        setStatus("Enter a file name to save the score");
+        return false;
+      }
+      downloadName = normalizedName.toLowerCase().endsWith(".ktw") ? normalizedName : `${normalizedName}.ktw`;
+    }
     const blob = new Blob([contents], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const anchor = window.document.createElement("a");
     anchor.href = url;
-    anchor.download = saveName;
+    anchor.download = downloadName;
     anchor.click();
     URL.revokeObjectURL(url);
     savedDocumentRef.current = contents;
     setIsDirty(false);
-    setFileName(saveName);
-    setStatus(`Saved ${saveName}`);
+    setFileName(downloadName);
+    setStatus(`Saved ${downloadName}`);
     return true;
   };
 
@@ -1887,8 +1918,9 @@ export default function App() {
       if (choice === "cancel") return false;
       return choice === "discard" || await saveDocument();
     }
-    if (window.confirm(`Save changes before ${action}?`)) return saveDocument();
-    return window.confirm("Discard unsaved changes?");
+    const choice = await new Promise<DiscardChoice>((resolve) => setDiscardPrompt({ action, resolve }));
+    if (choice === "cancel") return false;
+    return choice === "discard" || await saveDocument();
   };
 
   useEffect(() => {
@@ -2037,6 +2069,13 @@ export default function App() {
         </div>}
       </main>
       <footer className="statusbar"><span>{status}</span><span>Snap: 1/{snapBase * divider}</span><span>Page {Math.min(pageIndex, document.pages.length - 1) + 1} of {document.pages.length}</span></footer>
+      {discardPrompt && <DiscardChangesDialog
+        action={discardPrompt.action}
+        onChoose={(choice) => {
+          discardPrompt.resolve(choice);
+          setDiscardPrompt(null);
+        }}
+      />}
       {scoreInfoDialogOpen && <ScoreInfoDialog
         scoreInfo={document.score_info}
         onClose={() => setScoreInfoDialogOpen(false)}
