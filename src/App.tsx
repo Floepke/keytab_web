@@ -784,7 +784,19 @@ function SystemPreview({
   const noteGeometriesInPaintOrder = [...noteGeometries].sort((first, second) => Number(first.isBlackKey) - Number(second.isBlackKey));
   const renderedNoteGeometriesInPaintOrder = [...renderedNoteGeometries].sort((first, second) => Number(first.isBlackKey) - Number(second.isBlackKey));
   const countLines = stave.events.filter((event): event is CountLineEvent => event.type === "count_line");
-  const countLineRpitchAt = (xMm: number) => Math.round((xMm - pitchToXmm(60, stave, staveLeftMm, document.layout)) / semitoneMm);
+  const countLineHandleHalfMm = Math.max(semitoneMm, 6 / PIXELS_PER_MM) * 0.7;
+  const countLineRpitchBounds = (() => {
+    const centreMm = pitchToXmm(60, stave, staveLeftMm, document.layout);
+    return {
+      min: Math.ceil((countLineHandleHalfMm - centreMm) / semitoneMm),
+      max: Math.floor((page.width_mm - countLineHandleHalfMm - centreMm) / semitoneMm),
+    };
+  })();
+  const clampCountLineRpitch = (rpitch: number) => Math.max(
+    countLineRpitchBounds.min,
+    Math.min(countLineRpitchBounds.max, rpitch),
+  );
+  const countLineRpitchAt = (xMm: number) => clampCountLineRpitch(Math.round((xMm - pitchToXmm(60, stave, staveLeftMm, document.layout)) / semitoneMm));
   const countLineTargetAt = (xMm: number, yMm: number): { line: CountLineEvent; part: "start" | "end" | "line" } | null => {
     if (activeTool !== "count_line") return null;
     const x = mmToPixels(xMm);
@@ -794,8 +806,8 @@ function SystemPreview({
     for (const line of [...countLines].reverse()) {
       if (line.start_tick < system.start_tick || line.start_tick >= system.end_tick) continue;
       const lineY = yAt(line.start_tick);
-      const startX = centralCX + line.rpitch1 * mmToPixels(semitoneMm);
-      const endX = centralCX + line.rpitch2 * mmToPixels(semitoneMm);
+      const startX = centralCX + clampCountLineRpitch(line.rpitch1) * mmToPixels(semitoneMm);
+      const endX = centralCX + clampCountLineRpitch(line.rpitch2) * mmToPixels(semitoneMm);
       if (Math.abs(x - startX) <= tolerance && Math.abs(y - lineY) <= tolerance) return { line, part: "start" };
       if (Math.abs(x - endX) <= tolerance && Math.abs(y - lineY) <= tolerance) return { line, part: "end" };
       if (Math.abs(y - lineY) <= tolerance / 2 && x >= Math.min(startX, endX) && x <= Math.max(startX, endX)) return { line, part: "line" };
@@ -810,7 +822,7 @@ function SystemPreview({
     event.currentTarget.setPointerCapture(event.pointerId);
     const target = countLineTargetAt(xMm, yMm);
     if (target) {
-      countLineDragRef.current = { id: target.line.id, part: target.part, pointerId: event.pointerId, startTime: target.line.start_tick, startPointerTime: snapTimeAt(yMm), startRpitch1: target.line.rpitch1, startRpitch2: target.line.rpitch2, startRpitch: countLineRpitchAt(xMm) };
+      countLineDragRef.current = { id: target.line.id, part: target.part, pointerId: event.pointerId, startTime: target.line.start_tick, startPointerTime: snapTimeAt(yMm), startRpitch1: clampCountLineRpitch(target.line.rpitch1), startRpitch2: clampCountLineRpitch(target.line.rpitch2), startRpitch: countLineRpitchAt(xMm) };
       return true;
     }
     const line = createEvent("count_line") as CountLineEvent;
@@ -830,8 +842,12 @@ function SystemPreview({
     onEdit((editableDocument) => {
       const line = locateStave(editableDocument)?.[1].events.find((candidate): candidate is CountLineEvent => candidate.type === "count_line" && candidate.id === drag.id);
       if (!line) return;
+      line.rpitch1 = clampCountLineRpitch(line.rpitch1);
+      line.rpitch2 = clampCountLineRpitch(line.rpitch2);
       if (drag.part === "line") {
-        const delta = rpitch - drag.startRpitch;
+        const minDelta = countLineRpitchBounds.min - Math.min(drag.startRpitch1, drag.startRpitch2);
+        const maxDelta = countLineRpitchBounds.max - Math.max(drag.startRpitch1, drag.startRpitch2);
+        const delta = Math.max(minDelta, Math.min(maxDelta, rpitch - drag.startRpitch));
         line.start_tick = Math.max(system.start_tick, Math.min(system.end_tick - snapTicks, drag.startTime + snapTimeAt(yMm) - drag.startPointerTime));
         line.rpitch1 = drag.startRpitch1 + delta;
         line.rpitch2 = drag.startRpitch2 + delta;
@@ -854,7 +870,7 @@ function SystemPreview({
     if (activeTool !== "count_line") return false;
     const { xMm, yMm } = pointAt(event);
     const target = countLineTargetAt(xMm, yMm);
-    if (!target || target.part === "line") return false;
+    if (!target) return false;
     onEdit((editableDocument) => {
       const editableStave = locateStave(editableDocument)?.[1];
       if (!editableStave) return;
@@ -1284,8 +1300,8 @@ function SystemPreview({
       }) : null,
     count_lines: document.layout.countline_visible ? stave.events.filter((event): event is CountLineEvent => event.type === "count_line" && event.start_tick >= system.start_tick && event.start_tick < system.end_tick).map((line) => {
       const centralCX = xAtPitch(60);
-      const startX = centralCX + line.rpitch1 * mmToPixels(semitoneMm);
-      const endX = centralCX + line.rpitch2 * mmToPixels(semitoneMm);
+      const startX = centralCX + clampCountLineRpitch(line.rpitch1) * mmToPixels(semitoneMm);
+      const endX = centralCX + clampCountLineRpitch(line.rpitch2) * mmToPixels(semitoneMm);
       const y = yAt(line.start_tick);
       const handleSize = Math.max(mmToPixels(semitoneMm), 6) * 1.4;
       return <g key={line.id} className="count-line"><line x1={Math.min(startX, endX)} x2={Math.max(startX, endX)} y1={y} y2={y} stroke="var(--notation-color)" strokeWidth={mmToPixels(document.layout.countline_thickness_mm * scale)} strokeDasharray={dashPatternPixels(document.layout.countline_dash_pattern, scale)} />{activeTool === "count_line" && <><rect fill="var(--accent)" x={startX - handleSize / 2} y={y - handleSize / 2} width={handleSize} height={handleSize} /><rect fill="var(--accent)" x={endX - handleSize / 2} y={y - handleSize / 2} width={handleSize} height={handleSize} /></>}</g>;
