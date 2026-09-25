@@ -43,7 +43,7 @@ export function ManualDialog({ onClose }: { onClose: () => void }) {
             <Mode icon={<Save />} title="Save score">Save the current score. Use File &gt; Save As for a new file name or location.</Mode>
             <Mode icon={<img src={leftNoteIcon} alt="" />} title="Left note input">Left-click empty space to add a left-hand note. Drag a note head to move it; drag its body to set duration. Right-click a note to remove it.</Mode>
             <Mode icon={<img src={rightNoteIcon} alt="" />} title="Right note input">Works like Left note input, but new notes are right-hand notes.</Mode>
-            <Mode icon={<img src={arpeggioIcon} alt="" />} title="Arpeggio">Selects the Arpeggio tool. Arpeggio placement is not yet available in the web editor.</Mode>
+            <Mode icon={<img src={arpeggioIcon} alt="" />} title="Arpeggio">Click a note in a chord to add an arpeggio. Drag either endpoint handle to shape it; right-click a handle to remove it.</Mode>
             <Mode icon={<img src={countLineIcon} alt="" />} title="Count Line">Left-click to add a Count Line. Drag an endpoint handle to resize it; drag the dashed body to move it. Right-click the line or either endpoint handle to delete it.</Mode>
             <Mode icon={<img src={lineBreakIcon} alt="" />} title="System break">Click a highlighted measure boundary to add or remove a system break.</Mode>
             <Mode icon={<img src={timeSignatureIcon} alt="" />} title="Time signature">Click a barline to edit its time signature. Click a grid guide to enable it; right-click a grid guide to disable it.</Mode>

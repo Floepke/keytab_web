@@ -44,7 +44,7 @@ import {
   staveLineStyle,
   staveSemitoneMm,
 } from "./model/stave";
-import type { CountLineEvent, KeyTabDocument, NoteEvent, Stave, System, TempoEvent } from "./model/types";
+import type { ArpeggioEvent, CountLineEvent, KeyTabDocument, NoteEvent, Stave, System, TempoEvent } from "./model/types";
 
 const SNAP_BASES = [1, 2, 4, 8, 16, 32, 64, 128];
 const PIXELS_PER_MM = 3;
@@ -104,6 +104,7 @@ const SVG_DRAW_LAYERS = [
   "tempo",
   "count_lines",
   "notes",
+  "arpeggios",
   "beams",
   "editor_controls",
   "break_overlay",
@@ -180,6 +181,8 @@ function SystemPreview({
   activeTool,
   snapTicks,
   onEdit,
+  onBeginEditTransaction,
+  onCommitEditTransaction,
   onOpenStaveMenu,
   onOpenTimeSignatureDialog,
   onOpenTempoDialog,
@@ -196,6 +199,8 @@ function SystemPreview({
   activeTool: Tool;
   snapTicks: number;
   onEdit: (mutate: (document: KeyTabDocument) => void, message: string) => void;
+  onBeginEditTransaction: (message: string) => void;
+  onCommitEditTransaction: () => void;
   onOpenStaveMenu: (target: StaveMenuTarget) => void;
   onOpenTimeSignatureDialog: (target: TimeSignatureEditTarget) => void;
   onOpenTempoDialog: (target: TempoEditTarget) => void;
@@ -274,6 +279,7 @@ function SystemPreview({
     pointerId: number;
   } | null>(null);
   const countLineDragRef = useRef<{ id: string; staveId: string; part: "start" | "end" | "line"; pointerId: number; startTime: number; startPointerTime: number; startRpitch1: number; startRpitch2: number; startRpitch: number } | null>(null);
+  const arpeggioDragRef = useRef<{ id: string; staveId: string; handle: "low" | "high"; pointerId: number } | null>(null);
   const selectionDragRef = useRef<{ pointerId: number; startX: number; startY: number; startClientX: number; startClientY: number; rightButton: boolean } | null>(null);
   const suppressContextMenuRef = useRef(false);
   const [inputPreview, setInputPreview] = useState<{ staveId: string; time: number; pitch: number } | null>(null);
@@ -580,6 +586,7 @@ function SystemPreview({
     }
     const hand = activeTool;
     if (hit) {
+      onBeginEditTransaction(hit.part === "head" ? "Note moved" : "Note duration set");
       dragRef.current = { hand: hit.note.hand, mode: hit.part === "head" ? "move" : "duration", noteId: hit.note.id, staveId: target.stave.id, pointerId: event.pointerId };
       return;
     }
@@ -587,6 +594,7 @@ function SystemPreview({
     const time = snapTimeAt(yMm);
     const pitch = nearestStavePitch(target.stave, document.layout, target.leftMm, xMm, target.inputLedgers.length > 0);
     const noteId = createEvent("note").id;
+    onBeginEditTransaction(`${hand === "left" ? "Left" : "Right"} note added`);
     dragRef.current = { hand, mode: "duration", noteId, staveId: target.stave.id, pointerId: event.pointerId };
     onEdit((editableDocument) => {
       const editableTarget = locateStave(editableDocument, target.stave.id);
@@ -618,15 +626,23 @@ function SystemPreview({
     }
     const target = staveTargetById(drag.staveId);
     if (!target) return;
-    const nextPitch = drag.mode === "move" ? nearestStavePitch(target.stave, document.layout, target.leftMm, xMm, true) : null;
-    const currentPitch = drag.mode === "move" ? target.stave.events.find((candidate): candidate is NoteEvent => candidate.type === "note" && candidate.id === drag.noteId)?.pitch : null;
+    const movingNote = drag.mode === "move" ? target.stave.events.find((candidate): candidate is NoteEvent => candidate.type === "note" && candidate.id === drag.noteId) : null;
+    const nextPitch = movingNote ? nearestStavePitch(target.stave, document.layout, target.leftMm, xMm, true) : null;
+    const nextTime = movingNote ? Math.min(snapTimeAt(yMm), system.end_tick - movingNote.duration) : null;
+    const overlapsExistingNote = movingNote && target.stave.events.some((candidate): candidate is NoteEvent => candidate.type === "note"
+      && candidate.id !== drag.noteId
+      && candidate.pitch === nextPitch
+      && candidate.time < nextTime! + movingNote.duration
+      && nextTime! < candidate.time + candidate.duration);
+    if (overlapsExistingNote) return;
+    const currentPitch = movingNote?.pitch ?? null;
     onEdit((editableDocument) => {
       const editableTarget = locateStave(editableDocument, drag.staveId);
       if (!editableTarget) return;
       const note = editableTarget[1].events.find((candidate): candidate is NoteEvent => candidate.type === "note" && candidate.id === drag.noteId);
       if (!note) return;
       if (drag.mode === "move") {
-        note.time = Math.min(snapTimeAt(yMm), system.end_tick - note.duration);
+        note.time = nextTime!;
         note.pitch = nextPitch!;
         return;
       }
@@ -675,6 +691,74 @@ function SystemPreview({
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
+    onCommitEditTransaction();
+  };
+
+  const startArpeggioDrag = (event: PointerEvent<SVGElement>) => {
+    if (activeTool !== "arpeggio" || event.button !== 0) return false;
+    const { xMm, yMm } = pointAt(event);
+    const handle = arpeggioHandleAt(xMm, yMm);
+    if (handle) {
+      event.preventDefault();
+      try {
+        event.currentTarget.setPointerCapture(event.pointerId);
+      } catch {
+        // Synthetic pointer events do not always own a capturable pointer.
+      }
+      onBeginEditTransaction("Arpeggio reshaped");
+      arpeggioDragRef.current = { id: handle.arpeggio.id, staveId: handle.staveId, handle: handle.handle, pointerId: event.pointerId };
+      return true;
+    }
+    const hit = noteHitAt(xMm, yMm);
+    if (!hit) return false;
+    const members = hit.staveTarget.stave.events
+      .filter((candidate): candidate is NoteEvent => candidate.type === "note" && candidate.hand === hit.note.hand && time.eq(candidate.time, hit.note.time))
+      .sort((first, second) => first.pitch - second.pitch);
+    if (members.length < 2) return true;
+    const memberIds = members.map((member) => member.id);
+    const existing = hit.staveTarget.stave.events.find((candidate): candidate is ArpeggioEvent => candidate.type === "arpeggio" && candidate.note_ids.length === memberIds.length && candidate.note_ids.every((id, index) => id === memberIds[index]));
+    if (!existing) {
+      const arpeggio = createEvent("arpeggio") as ArpeggioEvent;
+      arpeggio.start_tick = hit.note.time;
+      arpeggio.rtime1_ticks = 0;
+      arpeggio.rtime2_ticks = snapTicks;
+      arpeggio.note_ids = memberIds;
+      arpeggio.note_pitches = members.map((member) => member.pitch);
+      arpeggio.hand = hit.note.hand;
+      onEdit((editableDocument) => {
+        const editableTarget = locateStave(editableDocument, hit.staveTarget.stave.id);
+        if (!editableTarget?.[1].events.some((candidate) => candidate.type === "arpeggio" && candidate.note_ids.length === memberIds.length && candidate.note_ids.every((id, index) => id === memberIds[index]))) {
+          editableTarget?.[1].events.push(arpeggio);
+        }
+      }, "Arpeggio added");
+    }
+    return true;
+  };
+
+  const updateArpeggioDrag = (event: PointerEvent<SVGElement>) => {
+    const drag = arpeggioDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return false;
+    const { yMm } = pointAt(event);
+    onEdit((editableDocument) => {
+      const editableTarget = locateStave(editableDocument, drag.staveId);
+      const arpeggio = editableTarget?.[1].events.find((candidate): candidate is ArpeggioEvent => candidate.type === "arpeggio" && candidate.id === drag.id);
+      if (!arpeggio) return;
+      const offset = snapTimeAt(yMm) - arpeggio.start_tick;
+      if (drag.handle === "low") {
+        arpeggio.rtime1_ticks = offset && arpeggio.rtime2_ticks && offset * arpeggio.rtime2_ticks > 0 ? 0 : offset;
+      } else {
+        arpeggio.rtime2_ticks = offset && arpeggio.rtime1_ticks && offset * arpeggio.rtime1_ticks > 0 ? 0 : offset;
+      }
+    }, "Arpeggio reshaped");
+    return true;
+  };
+
+  const endArpeggioDrag = (event: PointerEvent<SVGElement>) => {
+    if (arpeggioDragRef.current?.pointerId !== event.pointerId) return false;
+    arpeggioDragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    onCommitEditTransaction();
+    return true;
   };
 
   const clearInputPreview = () => setInputPreview(null);
@@ -691,10 +775,26 @@ function SystemPreview({
       const continuationId = hit.note.continuation_id ?? hit.note.id;
       for (const editableSystem of editableDocument.pages.flatMap((editablePage) => editablePage.systems)) {
         for (const editableStave of editableSystem.staves) {
-          editableStave.events = editableStave.events.filter((candidate) => candidate.type !== "note" || (candidate.id !== continuationId && candidate.continuation_id !== continuationId));
+          const removedNoteIds = new Set(editableStave.events
+            .filter((candidate): candidate is NoteEvent => candidate.type === "note" && (candidate.id === continuationId || candidate.continuation_id === continuationId))
+            .map((candidate) => candidate.id));
+          editableStave.events = editableStave.events.filter((candidate) => candidate.type !== "note" || !removedNoteIds.has(candidate.id));
+          editableStave.events = editableStave.events.filter((candidate) => candidate.type !== "arpeggio" || !candidate.note_ids.some((id) => removedNoteIds.has(id)));
         }
       }
     }, "Note removed");
+  };
+
+  const removeArpeggioAt = (event: MouseEvent<SVGElement>) => {
+    if (activeTool !== "arpeggio") return false;
+    const { xMm, yMm } = pointAt(event);
+    const handle = arpeggioHandleAt(xMm, yMm);
+    if (!handle) return false;
+    onEdit((editableDocument) => {
+      const editableTarget = locateStave(editableDocument, handle.staveId);
+      if (editableTarget) editableTarget[1].events = editableTarget[1].events.filter((candidate) => candidate.id !== handle.arpeggio.id);
+    }, "Arpeggio removed");
+    return true;
   };
 
   const notes = stave.events.filter((event): event is NoteEvent => event.type === "note");
@@ -704,10 +804,11 @@ function SystemPreview({
   const noteHeightMm = semitoneMm * 2 * document.layout.notehead_height_scaling;
   const stemLengthMm = semitoneMm * document.layout.note_stem_length_semitone;
   const noteStrokePx = mmToPixels(document.layout.note_stem_thickness_mm * scale);
-  const noteGeometries = notes.map((note) => {
+  const baseNoteGeometries = notes.map((note) => {
+    const displayTime = note.time;
     const x = xAtPitch(note.pitch);
-    const start = yAt(note.time);
-    const end = yAt(Math.min(system.end_tick, note.time + note.duration));
+    const start = yAt(displayTime);
+    const end = yAt(Math.min(system.end_tick, displayTime + note.duration));
     const isBlack = isBlackKey(note.pitch);
     const blackAbove = document.layout.black_note_rule === "above_stem";
     const headUp = note.notehead === "auto" ? isBlack && blackAbove : note.notehead.endsWith("_up");
@@ -739,9 +840,9 @@ function SystemPreview({
       (note.continues_from_previous && tick === note.time)
       || (note.time < tick && (tick < note.time + note.duration || (note.continues_to_next && tick === note.time + note.duration)))
     ));
-    return { note, staveId: stave.id, x, start, end, stemTipX, headPath, body, filled, form, headUp, headHalfWidth: halfWidth, isBlackKey: isBlack, stop, noteHeightPx: mmToPixels(noteHeightMm), noteStrokePx, stopStrokePx: mmToPixels(document.layout.note_stopsign_thickness_mm * scale), dotRadiusPx: mmToPixels(document.layout.note_continuation_dot_size_mm * scale) / 2, dots: dotTicks.map((tick) => [x, yAt(tick) + mmToPixels(semitoneMm)] as const) };
+    return { note, displayTime, staveId: stave.id, x, start, end, stemTipX, headPoints, headPath, body, filled, form, headUp, headHalfWidth: halfWidth, isBlackKey: isBlack, stop, noteHeightPx: mmToPixels(noteHeightMm), noteStrokePx, stopStrokePx: mmToPixels(document.layout.note_stopsign_thickness_mm * scale), dotRadiusPx: mmToPixels(document.layout.note_continuation_dot_size_mm * scale) / 2, dots: dotTicks.map((tick) => [x, yAt(tick) + mmToPixels(semitoneMm)] as const) };
   });
-  const additionalNoteGeometries = staveTargets.slice(1).flatMap((target) => {
+  const baseAdditionalNoteGeometries = staveTargets.slice(1).flatMap((target) => {
     const candidateNotes = target.stave.events.filter((event): event is NoteEvent => event.type === "note");
     const candidateScale = document.layout.scale * target.stave.scale;
     const candidateNoteWidthMm = target.semitoneMm * document.layout.note_width_scaling;
@@ -749,9 +850,10 @@ function SystemPreview({
     const candidateStemLengthMm = target.semitoneMm * document.layout.note_stem_length_semitone;
     const candidateNoteStrokePx = mmToPixels(document.layout.note_stem_thickness_mm * candidateScale);
     return candidateNotes.map((note) => {
+      const displayTime = note.time;
       const x = mmToPixels(pitchToXmm(note.pitch, target.stave, target.leftMm, document.layout));
-      const start = yAt(note.time);
-      const end = yAt(Math.min(system.end_tick, note.time + note.duration));
+      const start = yAt(displayTime);
+      const end = yAt(Math.min(system.end_tick, displayTime + note.duration));
       const isBlack = isBlackKey(note.pitch);
       const headUp = note.notehead === "auto" ? isBlack && document.layout.black_note_rule === "above_stem" : note.notehead.endsWith("_up");
       const filled = note.notehead === "auto" ? isBlack : note.notehead.includes("black");
@@ -778,12 +880,85 @@ function SystemPreview({
         ...(note.continues_from_previous ? [note.time] : []),
         ...(note.continues_to_next ? [note.time + note.duration] : []),
       ])].filter((tick) => (note.continues_from_previous && tick === note.time) || (note.time < tick && (tick < note.time + note.duration || (note.continues_to_next && tick === note.time + note.duration))));
-      return { note, staveId: target.stave.id, x, start, end, stemTipX, headPath: `M ${headPoints.map(([pointX, pointY]) => `${pointX} ${pointY}`).join(" L ")} Z`, body, filled, form, headUp, headHalfWidth: halfWidth, isBlackKey: isBlack, stop, noteHeightPx, noteStrokePx: candidateNoteStrokePx, stopStrokePx: mmToPixels(document.layout.note_stopsign_thickness_mm * candidateScale), dotRadiusPx: mmToPixels(document.layout.note_continuation_dot_size_mm * candidateScale) / 2, dots: dotTicks.map((tick) => [x, yAt(tick) + bodyHalfWidth] as const) };
+      return { note, displayTime, staveId: target.stave.id, x, start, end, stemTipX, headPoints, headPath: `M ${headPoints.map(([pointX, pointY]) => `${pointX} ${pointY}`).join(" L ")} Z`, body, filled, form, headUp, headHalfWidth: halfWidth, isBlackKey: isBlack, stop, noteHeightPx, noteStrokePx: candidateNoteStrokePx, stopStrokePx: mmToPixels(document.layout.note_stopsign_thickness_mm * candidateScale), dotRadiusPx: mmToPixels(document.layout.note_continuation_dot_size_mm * candidateScale) / 2, dots: dotTicks.map((tick) => [x, yAt(tick) + bodyHalfWidth] as const) };
     });
   });
+  const baseRenderedNoteGeometries = [...baseNoteGeometries, ...baseAdditionalNoteGeometries];
+  const arpeggioMemberStarts = new Map<string, number>();
+  for (const target of staveTargets) {
+    const geometryById = new Map(baseRenderedNoteGeometries.filter((geometry) => geometry.staveId === target.stave.id).map((geometry) => [geometry.note.id, geometry]));
+    for (const arpeggio of target.stave.events.filter((event): event is ArpeggioEvent => event.type === "arpeggio")) {
+      const members = arpeggio.note_ids
+        .map((id) => geometryById.get(id))
+        .filter((geometry): geometry is typeof baseRenderedNoteGeometries[number] => geometry !== undefined && geometry.note.hand === arpeggio.hand && time.eq(geometry.note.time, arpeggio.start_tick))
+        .sort((first, second) => first.note.pitch - second.note.pitch);
+      if (members.length < 2) continue;
+      const low = members[0];
+      const high = members.at(-1)!;
+      const lowY = yAt(arpeggio.start_tick + arpeggio.rtime1_ticks);
+      const highY = yAt(arpeggio.start_tick + arpeggio.rtime2_ticks);
+      const slope = (highY - lowY) / (high.x - low.x);
+      const anchor = arpeggio.hand === "left" ? high : low;
+      const anchorY = arpeggio.hand === "left" ? highY : lowY;
+      const anchorResiduals = anchor.headPoints.map(([x, y]) => y + anchorY - anchor.start - slope * x);
+      const lineIntercept = anchor.headUp ? Math.max(...anchorResiduals) : Math.min(...anchorResiduals);
+      for (const member of members) {
+        const supportResiduals = member.headPoints.map(([x, y]) => y - member.start - slope * x);
+        const support = member.headUp ? Math.max(...supportResiduals) : Math.min(...supportResiduals);
+        arpeggioMemberStarts.set(member.note.id, lineIntercept - support);
+      }
+    }
+  }
+  const shiftArpeggioMember = <Geometry extends typeof baseRenderedNoteGeometries[number]>(geometry: Geometry) => {
+    const start = arpeggioMemberStarts.get(geometry.note.id);
+    if (start === undefined) return geometry;
+    const delta = start - geometry.start;
+    const headPoints = geometry.headPoints.map(([x, y]) => [x, y + delta] as const);
+    return {
+      ...geometry,
+      displayTime: geometry.note.time + delta * (system.end_tick - system.start_tick) / (system.height_mm * PIXELS_PER_MM),
+      start,
+      headPoints,
+      headPath: `M ${headPoints.map(([x, y]) => `${x} ${y}`).join(" L ")} Z`,
+      body: geometry.body.map(([x, y], index) => [x, y + (index === 0 || index === 1 || index === 4 ? delta : 0)] as const),
+      dots: geometry.dots.filter(([, y]) => y > start && y < geometry.end),
+    };
+  };
+  const noteGeometries = baseNoteGeometries.map(shiftArpeggioMember);
+  const additionalNoteGeometries = baseAdditionalNoteGeometries.map(shiftArpeggioMember);
   const renderedNoteGeometries = [...noteGeometries, ...additionalNoteGeometries];
   const noteGeometriesInPaintOrder = [...noteGeometries].sort((first, second) => Number(first.isBlackKey) - Number(second.isBlackKey));
   const renderedNoteGeometriesInPaintOrder = [...renderedNoteGeometries].sort((first, second) => Number(first.isBlackKey) - Number(second.isBlackKey));
+  const arpeggioMemberIds = new Set(arpeggioMemberStarts.keys());
+  const arpeggioGeometries = staveTargets.flatMap((target) => target.stave.events
+    .filter((event): event is ArpeggioEvent => event.type === "arpeggio" && event.start_tick >= system.start_tick && event.start_tick < system.end_tick)
+    .flatMap((arpeggio) => {
+      const notesById = new Map(target.stave.events.filter((event): event is NoteEvent => event.type === "note").map((note) => [note.id, note]));
+      const members = arpeggio.note_ids
+        .map((id) => notesById.get(id))
+        .filter((note): note is NoteEvent => note !== undefined && note.hand === arpeggio.hand && time.eq(note.time, arpeggio.start_tick))
+        .sort((first, second) => first.pitch - second.pitch);
+      if (members.length < 2) return [];
+      const low = members[0];
+      const high = members.at(-1)!;
+      const lowPoint = { x: mmToPixels(pitchToXmm(low.pitch, target.stave, target.leftMm, document.layout)), y: yAt(arpeggio.start_tick + arpeggio.rtime1_ticks) };
+      const highPoint = { x: mmToPixels(pitchToXmm(high.pitch, target.stave, target.leftMm, document.layout)), y: yAt(arpeggio.start_tick + arpeggio.rtime2_ticks) };
+      const anchor = arpeggio.hand === "left" ? highPoint : lowPoint;
+      const opposite = arpeggio.hand === "left" ? lowPoint : highPoint;
+      const length = Math.hypot(opposite.x - anchor.x, opposite.y - anchor.y);
+      const extension = length > 0 ? mmToPixels(target.semitoneMm * document.layout.note_stem_length_semitone) / length : 0;
+      return [{ id: arpeggio.id, staveId: target.stave.id, arpeggio, lowPoint, highPoint, lineStart: anchor, lineEnd: { x: opposite.x + (opposite.x - anchor.x) * extension, y: opposite.y + (opposite.y - anchor.y) * extension }, strokeWidth: mmToPixels(document.layout.note_stem_thickness_mm * document.layout.scale * target.stave.scale) }];
+    }));
+  const arpeggioHandleAt = (xMm: number, yMm: number) => {
+    const x = mmToPixels(xMm);
+    const y = mmToPixels(yMm);
+    const hitRadius = mmToPixels(4);
+    const candidates = arpeggioGeometries.flatMap((geometry) => ([
+      { ...geometry, handle: "low" as const, point: geometry.lowPoint },
+      { ...geometry, handle: "high" as const, point: geometry.highPoint },
+    ])).filter((candidate) => (candidate.point.x - x) ** 2 + (candidate.point.y - y) ** 2 <= hitRadius ** 2);
+    return candidates.sort((first, second) => (first.point.x - x) ** 2 + (first.point.y - y) ** 2 - ((second.point.x - x) ** 2 + (second.point.y - y) ** 2))[0] ?? null;
+  };
   const countLineMetrics = (target: typeof staveTargets[number]) => {
     const handleHalfMm = Math.max(target.semitoneMm, 6 / PIXELS_PER_MM) * 0.7;
     const centreMm = pitchToXmm(60, target.stave, target.leftMm, document.layout);
@@ -830,6 +1005,7 @@ function SystemPreview({
     const target = countLineTargetAt(xMm, yMm);
     if (target) {
       const metrics = countLineMetrics(target.staveTarget);
+      onBeginEditTransaction("Count line updated");
       countLineDragRef.current = { id: target.line.id, staveId: target.staveTarget.stave.id, part: target.part, pointerId: event.pointerId, startTime: target.line.start_tick, startPointerTime: snapTimeAt(yMm), startRpitch1: metrics.clamp(target.line.rpitch1), startRpitch2: metrics.clamp(target.line.rpitch2), startRpitch: metrics.rpitchAt(xMm) };
       return true;
     }
@@ -841,6 +1017,7 @@ function SystemPreview({
     line.start_tick = snapTimeAt(yMm);
     line.rpitch1 = rpitch;
     line.rpitch2 = rpitch;
+    onBeginEditTransaction("Count line added");
     countLineDragRef.current = { id: line.id, staveId: staveTarget.stave.id, part: "end", pointerId: event.pointerId, startTime: line.start_tick, startPointerTime: line.start_tick, startRpitch1: rpitch, startRpitch2: rpitch, startRpitch: rpitch };
     onEdit((editableDocument) => { locateStave(editableDocument, staveTarget.stave.id)?.[1].events.push(line); }, "Count line added");
     return true;
@@ -878,6 +1055,7 @@ function SystemPreview({
     if (countLineDragRef.current?.pointerId !== event.pointerId) return false;
     countLineDragRef.current = null;
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    onCommitEditTransaction();
     return true;
   };
   const removeCountLineAt = (event: MouseEvent<SVGElement>) => {
@@ -947,7 +1125,7 @@ function SystemPreview({
     ).map((ledger) => ({ ...ledger, staveId: target.stave.id }));
   });
   const chordConnectors = ["left", "right"].flatMap((hand) => {
-    const remaining = renderedNoteGeometries.filter((geometry) => geometry.note.hand === hand);
+    const remaining = renderedNoteGeometries.filter((geometry) => geometry.note.hand === hand && !arpeggioMemberIds.has(geometry.note.id));
     const connectors: { staveId: string; tick: number; x1: number; y: number; x2: number; strokeWidth: number }[] = [];
     while (remaining.length) {
       const first = remaining.shift()!;
@@ -1356,7 +1534,7 @@ function SystemPreview({
         return (
           <g key={geometry.note.id} className={`score-note ${geometry.note.hand}`}>
             {document.layout.note_head_visible && !geometry.note.continues_from_previous && (geometry.form === "cross" ? <path d={`M ${geometry.x - geometry.headHalfWidth} ${geometry.start} L ${geometry.x + geometry.headHalfWidth} ${geometry.start + geometry.noteHeightPx} M ${geometry.x + geometry.headHalfWidth} ${geometry.start} L ${geometry.x - geometry.headHalfWidth} ${geometry.start + geometry.noteHeightPx}`} className="note-outline" style={{ stroke: notationColor }} /> : <path d={geometry.headPath} style={{ fill: selected ? "var(--accent)" : geometry.filled ? "var(--notation-color)" : "#fffefa", stroke: notationColor }} className={`note-outline ${geometry.filled ? "black-notehead" : "white-notehead"}`} />)}
-            {document.layout.note_stem_visible && <line x1={geometry.x} y1={geometry.start} x2={geometry.stemTipX} y2={geometry.start} className="note-stem" style={{ stroke: notationColor }} strokeWidth={geometry.noteStrokePx} />}
+            {document.layout.note_stem_visible && !arpeggioMemberIds.has(geometry.note.id) && <line x1={geometry.x} y1={geometry.start} x2={geometry.stemTipX} y2={geometry.start} className="note-stem" style={{ stroke: notationColor }} strokeWidth={geometry.noteStrokePx} />}
             {document.layout.note_stop_visible && stopPath && <path d={stopPath} className="note-stop" strokeWidth={geometry.stopStrokePx} />}
             {document.layout.note_continuation_dot_visible && geometry.dots.map(([dotX, dotY], index) => <circle key={index} cx={dotX} cy={dotY} r={geometry.dotRadiusPx} className="continuation-dot" />)}
           </g>
@@ -1364,6 +1542,13 @@ function SystemPreview({
       })}
       {chordConnectors.map((connector) => <line key={`${connector.staveId}-${connector.tick}-${connector.x1}-${connector.x2}`} x1={connector.x1} y1={connector.y} x2={connector.x2} y2={connector.y} className="note-stem" strokeWidth={connector.strokeWidth} />)}
     </>,
+    arpeggios: arpeggioGeometries.map((geometry) => <g key={geometry.id} className="arpeggio">
+      {(geometry.arpeggio.rtime1_ticks !== 0 || geometry.arpeggio.rtime2_ticks !== 0) && <line x1={geometry.lineStart.x} y1={geometry.lineStart.y} x2={geometry.lineEnd.x} y2={geometry.lineEnd.y} strokeWidth={geometry.strokeWidth} />}
+      {activeTool === "arpeggio" && <g className="arpeggio-handles" data-export="exclude">
+        <circle cx={geometry.lowPoint.x} cy={geometry.lowPoint.y} r={mmToPixels(2)} />
+        <circle cx={geometry.highPoint.x} cy={geometry.highPoint.y} r={mmToPixels(2)} />
+      </g>}
+    </g>),
     beams: document.layout.beam_visible ? beamGeometries.map((beam) => (
       <g key={beam.id} className="beam">
         <path d={`M ${beam.polygon.map(([pointX, pointY]) => `${pointX} ${pointY}`).join(" L ")} Z`} />
@@ -1419,11 +1604,11 @@ function SystemPreview({
   return (
     <g
       onClick={(event) => { if (selectedNoteIds.size) onClearSelection(); else { editSystemBreak(event); editTimeSignature(event); editTempo(event); } }}
-      onPointerDown={(event) => { if (!startSelectionDrag(event) && !startCountLineDrag(event)) startNoteDrag(event); }}
+      onPointerDown={(event) => { if (!startSelectionDrag(event) && !startCountLineDrag(event) && !startArpeggioDrag(event)) startNoteDrag(event); }}
       onPointerOver={(event) => { updateSystemBreakHover(event); updateMeterHover(event); updateStaveControlHover(event); updatePasteTarget(event); }}
-      onPointerMove={(event) => { updateSystemBreakHover(event); updateMeterHover(event); updateStaveControlHover(event); updatePasteTarget(event); if (!updateSelectionDrag(event) && !updateCountLineDrag(event)) updateNoteDrag(event); }}
-      onPointerUp={(event) => { if (!endSelectionDrag(event) && !endCountLineDrag(event)) endNoteDrag(event); }}
-      onPointerCancel={(event) => { if (!endSelectionDrag(event) && !endCountLineDrag(event)) endNoteDrag(event); }}
+      onPointerMove={(event) => { updateSystemBreakHover(event); updateMeterHover(event); updateStaveControlHover(event); updatePasteTarget(event); if (!updateSelectionDrag(event) && !updateCountLineDrag(event) && !updateArpeggioDrag(event)) updateNoteDrag(event); }}
+      onPointerUp={(event) => { if (!endSelectionDrag(event) && !endCountLineDrag(event) && !endArpeggioDrag(event)) endNoteDrag(event); }}
+      onPointerCancel={(event) => { if (!endSelectionDrag(event) && !endCountLineDrag(event) && !endArpeggioDrag(event)) endNoteDrag(event); }}
       onPointerLeave={() => { clearInputPreview(); clearSystemBreakHover(); setMeterTarget(null); setHoveredStaveControlId(null); }}
       onContextMenu={(event) => {
         if (suppressContextMenuRef.current) {
@@ -1433,6 +1618,10 @@ function SystemPreview({
         }
         if (activeTool === "count_line") {
           if (removeCountLineAt(event)) event.preventDefault();
+          return;
+        }
+        if (activeTool === "arpeggio") {
+          if (removeArpeggioAt(event)) event.preventDefault();
           return;
         }
         if (selectedNoteIds.size) {
@@ -1451,12 +1640,14 @@ function SystemPreview({
   );
 }
 
-function PaperPreview({ document, pageIndex, activeTool, snapTicks, onEdit, onOpenStaveMenu, onOpenTimeSignatureDialog, onOpenTempoDialog, selectedNoteIds, onSelectionChange, onClearSelection, onPasteTargetChange, onAuditionNote, playbackTick, exportOnly = false }: {
+function PaperPreview({ document, pageIndex, activeTool, snapTicks, onEdit, onBeginEditTransaction, onCommitEditTransaction, onOpenStaveMenu, onOpenTimeSignatureDialog, onOpenTempoDialog, selectedNoteIds, onSelectionChange, onClearSelection, onPasteTargetChange, onAuditionNote, playbackTick, exportOnly = false }: {
   document: KeyTabDocument;
   pageIndex: number;
   activeTool: Tool;
   snapTicks: number;
   onEdit: (mutate: (document: KeyTabDocument) => void, message: string) => void;
+  onBeginEditTransaction: (message: string) => void;
+  onCommitEditTransaction: () => void;
   onOpenStaveMenu: (target: StaveMenuTarget) => void;
   onOpenTimeSignatureDialog: (target: TimeSignatureEditTarget) => void;
   onOpenTempoDialog: (target: TempoEditTarget) => void;
@@ -1583,7 +1774,7 @@ function PaperPreview({ document, pageIndex, activeTool, snapTicks, onEdit, onOp
         <text x={titleX} y={titleY} dominantBaseline="hanging" className="score-title" style={{ fontFamily: resolveWebSafeFontFamily(document.layout.font_title.family), fontSize: metadataFontSize(document.layout.font_title.size_pt), fontWeight: document.layout.font_title.bold ? 700 : 400, fontStyle: document.layout.font_title.italic ? "italic" : "normal", textDecoration: document.layout.font_title.underline ? "underline" : "none" }}>{title}</text>
         {composer && <text x={composerX} y={titleY} textAnchor="end" dominantBaseline="hanging" className="score-composer" style={{ fontFamily: resolveWebSafeFontFamily(document.layout.font_composer.family), fontSize: metadataFontSize(document.layout.font_composer.size_pt), fontWeight: document.layout.font_composer.bold ? 700 : 400, fontStyle: document.layout.font_composer.italic ? "italic" : "normal", textDecoration: document.layout.font_composer.underline ? "underline" : "none" }}>{composer}</text>}
       </g>}
-      {page.systems.map((system) => <SystemPreview key={system.id} document={document} page={page} system={system} activeTool={activeTool} snapTicks={snapTicks} onEdit={onEdit} onOpenStaveMenu={onOpenStaveMenu} onOpenTimeSignatureDialog={onOpenTimeSignatureDialog} onOpenTempoDialog={onOpenTempoDialog} selectedNoteIds={selectedNoteIds} onSelectionChange={onSelectionChange} onClearSelection={onClearSelection} onPasteTargetChange={onPasteTargetChange} onAuditionNote={onAuditionNote} playbackTick={playbackTick} />)}
+      {page.systems.map((system) => <SystemPreview key={system.id} document={document} page={page} system={system} activeTool={activeTool} snapTicks={snapTicks} onEdit={onEdit} onBeginEditTransaction={onBeginEditTransaction} onCommitEditTransaction={onCommitEditTransaction} onOpenStaveMenu={onOpenStaveMenu} onOpenTimeSignatureDialog={onOpenTimeSignatureDialog} onOpenTempoDialog={onOpenTempoDialog} selectedNoteIds={selectedNoteIds} onSelectionChange={onSelectionChange} onClearSelection={onClearSelection} onPasteTargetChange={onPasteTargetChange} onAuditionNote={onAuditionNote} playbackTick={playbackTick} />)}
       {pageSelectionRect && <g className="selection-overlay" pointerEvents="none" data-export="exclude"><rect x={Math.min(pageSelectionRect.startX, pageSelectionRect.endX)} y={Math.min(pageSelectionRect.startY, pageSelectionRect.endY)} width={Math.abs(pageSelectionRect.endX - pageSelectionRect.startX)} height={Math.abs(pageSelectionRect.endY - pageSelectionRect.startY)} fill="var(--accent)" fillOpacity={0.15} stroke="var(--accent)" strokeWidth={1.5} /></g>}
       <g className="svg-layer svg-layer-page_number"><text x={footerX} y={footerY} dominantBaseline="alphabetic" className="score-footer" style={{ fontFamily: resolveWebSafeFontFamily(document.layout.font_copyright.family), fontSize: metadataFontSize(document.layout.font_copyright.size_pt), fontWeight: document.layout.font_copyright.bold ? 700 : 400, fontStyle: document.layout.font_copyright.italic ? "italic" : "normal", textDecoration: document.layout.font_copyright.underline ? "underline" : "none" }}>{footer}</text></g>
     </svg>
@@ -1642,6 +1833,7 @@ export default function App() {
   const playbackRequestRef = useRef(0);
   const playbackStartingRef = useRef(false);
   const savedDocumentRef = useRef(serializeDocument(document));
+  const editTransactionRef = useRef<{ before: KeyTabDocument; beforeContents: string; message: string } | null>(null);
   documentRef.current = document;
   const snapTicks = Math.max(1, (256 * 4) / (snapBase * divider));
   const menus = ["File", "Edit", "View", "Playback", "Help"];
@@ -1678,15 +1870,36 @@ export default function App() {
     });
   };
 
+  const beginDocumentEditTransaction = (message: string) => {
+    if (editTransactionRef.current) return;
+    editTransactionRef.current = {
+      before: structuredClone(documentRef.current),
+      beforeContents: serializeDocument(documentRef.current),
+      message,
+    };
+  };
+
+  const commitDocumentEditTransaction = () => {
+    const transaction = editTransactionRef.current;
+    editTransactionRef.current = null;
+    if (!transaction || serializeDocument(documentRef.current) === transaction.beforeContents) return;
+    undoStackRef.current.push(transaction.before);
+    redoStackRef.current = [];
+    setStatus(transaction.message);
+  };
+
   const editDocument = (mutate: (editableDocument: KeyTabDocument) => void, message: string) => {
     setDocument((currentDocument) => {
-      undoStackRef.current.push(structuredClone(currentDocument));
-      redoStackRef.current = [];
+      if (!editTransactionRef.current) {
+        undoStackRef.current.push(structuredClone(currentDocument));
+        redoStackRef.current = [];
+      }
       const updatedDocument = structuredClone(currentDocument);
       mutate(updatedDocument);
       return updatedDocument;
     });
-    setStatus(message);
+    if (editTransactionRef.current) editTransactionRef.current.message = message;
+    else setStatus(message);
   };
 
   const stopPlayback = (message = "Playback stopped") => {
@@ -2124,6 +2337,12 @@ export default function App() {
       } else if (event.key.toLowerCase() === "t") {
         event.preventDefault();
         selectToolFromShortcut(event.shiftKey ? "tempo" : "meter");
+      } else if (event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        setStyleDialogOpen(true);
+      } else if (event.key.toLowerCase() === "i") {
+        event.preventDefault();
+        setScoreInfoDialogOpen(true);
       } else if (event.key === "ArrowLeft" && selectedNoteIdsRef.current.size) {
         event.preventDefault();
         transposeSelectedNotes(-1);
@@ -2553,11 +2772,11 @@ export default function App() {
         </aside>
         <section ref={canvasAreaRef} className="canvas-area" aria-label="Score workspace" onPointerDownCapture={startViewportPan} onPointerMove={updateViewportPan} onPointerUp={endViewportPan} onPointerCancel={endViewportPan}>
           <div className="paper-frame" style={{ width: `${document.pages[Math.min(pageIndex, document.pages.length - 1)].width_mm * PIXELS_PER_MM * zoom}px` }}>
-            <PaperPreview document={document} pageIndex={Math.min(pageIndex, document.pages.length - 1)} activeTool={activeTool} snapTicks={snapTicks} onEdit={editDocument} onOpenStaveMenu={setStaveMenu} onOpenTimeSignatureDialog={setTimeSignatureEdit} onOpenTempoDialog={setTempoEdit} selectedNoteIds={selectedNoteIds} onSelectionChange={selectNotes} onClearSelection={() => updateSelectedNoteIds([])} onPasteTargetChange={(target) => { pasteTargetRef.current = target; }} onAuditionNote={auditionNote} playbackTick={playbackTick} />
+            <PaperPreview document={document} pageIndex={Math.min(pageIndex, document.pages.length - 1)} activeTool={activeTool} snapTicks={snapTicks} onEdit={editDocument} onBeginEditTransaction={beginDocumentEditTransaction} onCommitEditTransaction={commitDocumentEditTransaction} onOpenStaveMenu={setStaveMenu} onOpenTimeSignatureDialog={setTimeSignatureEdit} onOpenTempoDialog={setTempoEdit} selectedNoteIds={selectedNoteIds} onSelectionChange={selectNotes} onClearSelection={() => updateSelectedNoteIds([])} onPasteTargetChange={(target) => { pasteTargetRef.current = target; }} onAuditionNote={auditionNote} playbackTick={playbackTick} />
           </div>
         </section>
         {pdfPagesMounted && <div aria-hidden="true" style={{ position: "fixed", left: "-100000px", top: 0, width: 0, height: 0, overflow: "hidden", opacity: 0, pointerEvents: "none" }}>
-          {document.pages.map((page, index) => <PaperPreview key={page.id} document={document} pageIndex={index} activeTool="left" snapTicks={snapTicks} onEdit={editDocument} onOpenStaveMenu={setStaveMenu} onOpenTimeSignatureDialog={setTimeSignatureEdit} onOpenTempoDialog={setTempoEdit} selectedNoteIds={new Set()} onSelectionChange={selectNotes} onClearSelection={() => undefined} onPasteTargetChange={() => undefined} onAuditionNote={() => undefined} playbackTick={null} exportOnly />)}
+          {document.pages.map((page, index) => <PaperPreview key={page.id} document={document} pageIndex={index} activeTool="left" snapTicks={snapTicks} onEdit={editDocument} onBeginEditTransaction={beginDocumentEditTransaction} onCommitEditTransaction={commitDocumentEditTransaction} onOpenStaveMenu={setStaveMenu} onOpenTimeSignatureDialog={setTimeSignatureEdit} onOpenTempoDialog={setTempoEdit} selectedNoteIds={new Set()} onSelectionChange={selectNotes} onClearSelection={() => undefined} onPasteTargetChange={() => undefined} onAuditionNote={() => undefined} playbackTick={null} exportOnly />)}
         </div>}
       </main>
       <footer className="statusbar"><span>{status}</span><span>Snap: 1/{snapBase * divider}</span><span>Page {Math.min(pageIndex, document.pages.length - 1) + 1} of {document.pages.length}</span></footer>

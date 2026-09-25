@@ -93,3 +93,5 @@ button { font: inherit; }
 .stave-range-visualizer, .staves-list, .score-info-body fieldset, .manual-controls, .manual-mode, .style-field, .midi-output-option { border-color: transparent; box-shadow: inset 0 1px 0 var(--surface-fade), inset 0 0 0 1px rgba(111, 132, 153, 0.22), 0 7px 15px -14px #000; }
 .staves-list-actions button, .stave-value-field input, .stave-range-inputs input, .stave-config-fields input, .score-info-body input, .style-field input:not([type="checkbox"]):not([type="color"]), .style-field select, .style-field textarea { border-color: transparent; box-shadow: inset 0 1px 3px #00000044, inset 0 0 0 1px rgba(111, 132, 153, 0.3), 0 0 10px -8px rgba(149, 174, 198, 0.8); }
 .style-tabs { border-bottom-color: transparent; box-shadow: inset 0 -11px 14px -15px var(--edge-fade); }.style-tabs button { border-right-color: transparent; box-shadow: inset -8px 0 10px -13px var(--edge-fade); }
+
+.arpeggio line { stroke: var(--notation-color); }.arpeggio-handles circle { fill: var(--accent); stroke: #17140c; stroke-width: 1; }
