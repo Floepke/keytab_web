@@ -24,7 +24,7 @@ import { ManualDialog } from "./ManualDialog";
 import { StaveRangeDialog, StavesDialog, StaveValueDialog, TempoDialog, TimeSignatureDialog, type StaveConfiguration, type StaveSetting } from "./StaveDialogs";
 import { MidiImportDialog } from "./MidiImportDialog";
 import { exportScorePdf } from "./pdfExport";
-import { playNoteAudition, startPlayback, type PlaybackSession } from "./playback";
+import { midiOutputPorts, playExternalMidiNote, playNoteAudition, startExternalMidiPlayback, startPlayback, type MidiOutputPort, type PlaybackSession } from "./playback";
 import { approveDesktopClose, cancelDesktopClose, confirmDesktopDiscard, isDesktopApp, loadLastOpenedDesktopScore, onDesktopCloseRequested, openDesktopScore, saveDesktopScore } from "./desktop";
 import { chooseSaveLocation, chooseScoreFile, clearLastFileHandle, hasFileSystemAccess, loadDefaultLayoutTemplate, loadLastFileHandle, loadSessionSnapshot, resetDefaultLayoutTemplate, saveDefaultLayoutTemplate, saveLastFileHandle, saveSessionSnapshot, type StoredFileHandle } from "./sessionStore";
 import { addMeasure, createDocument, deserializeDocument, ensureInitialTempo, ensureScoreDuration, removeMeasure, removeSystemBreak, repaginateDocument, serializeDocument, setForcedPageBreakBefore, setTimeSignature, setTimeSignatureGridLine, splitSystemAt, type ScoreTemplate } from "./model/document";
@@ -161,6 +161,7 @@ function documentFileName(document: KeyTabDocument): string {
 }
 
 type DiscardChoice = "save" | "discard" | "cancel";
+type PlaybackMode = "internal" | "external";
 
 function DiscardChangesDialog({ action, onChoose }: { action: string; onChoose: (choice: DiscardChoice) => void }) {
   return <div className="dialog-backdrop" role="presentation" onMouseDown={() => onChoose("cancel")}>
@@ -1616,6 +1617,12 @@ export default function App() {
   const [selectedNoteIds, setSelectedNoteIds] = useState<Set<string>>(() => new Set());
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackTick, setPlaybackTick] = useState<number | null>(null);
+  const [playbackMode, setPlaybackMode] = useState<PlaybackMode>(() => localStorage.getItem("keytab-playback-mode") === "external" ? "external" : "internal");
+  const [externalMidiOutputId, setExternalMidiOutputId] = useState(() => localStorage.getItem("keytab-external-midi-output") ?? "");
+  const [midiOutputDialogOpen, setMidiOutputDialogOpen] = useState(false);
+  const [midiOutputs, setMidiOutputs] = useState<MidiOutputPort[]>([]);
+  const [midiOutputLoading, setMidiOutputLoading] = useState(false);
+  const [midiOutputError, setMidiOutputError] = useState<string | null>(null);
   const [isDirty, setIsDirty] = useState(false);
   const openInputRef = useRef<HTMLInputElement>(null);
   const canvasAreaRef = useRef<HTMLElement>(null);
@@ -1637,7 +1644,39 @@ export default function App() {
   const savedDocumentRef = useRef(serializeDocument(document));
   documentRef.current = document;
   const snapTicks = Math.max(1, (256 * 4) / (snapBase * divider));
-  const menus = ["File", "Edit", "View", "Help"];
+  const menus = ["File", "Edit", "View", "Playback", "Help"];
+
+  const choosePlaybackMode = (mode: PlaybackMode) => {
+    if (mode === "external" && !externalMidiOutputId) {
+      setMidiOutputDialogOpen(true);
+      return;
+    }
+    if (isPlaying) stopPlayback();
+    localStorage.setItem("keytab-playback-mode", mode);
+    setPlaybackMode(mode);
+    setStatus(mode === "internal" ? "Using internal synth" : "Using external MIDI output");
+  };
+
+  const selectExternalMidiOutput = (outputId: string) => {
+    if (isPlaying) stopPlayback();
+    localStorage.setItem("keytab-external-midi-output", outputId);
+    localStorage.setItem("keytab-playback-mode", "external");
+    setExternalMidiOutputId(outputId);
+    setPlaybackMode("external");
+    setMidiOutputDialogOpen(false);
+    const output = midiOutputs.find((candidate) => candidate.id === outputId);
+    setStatus(`External MIDI output selected: ${output?.name ?? "port"}`);
+  };
+
+  const auditionNote = (pitch: number, velocity: number) => {
+    const audition = playbackMode === "external"
+      ? playExternalMidiNote(externalMidiOutputId, pitch, velocity)
+      : playNoteAudition(pitch, velocity);
+    void audition.catch((error) => {
+      const message = error instanceof Error ? error.message : "Unknown audio error";
+      setStatus(`Could not audition note: ${message}`);
+    });
+  };
 
   const editDocument = (mutate: (editableDocument: KeyTabDocument) => void, message: string) => {
     setDocument((currentDocument) => {
@@ -1669,7 +1708,9 @@ export default function App() {
     const request = playbackRequestRef.current;
     playbackStartingRef.current = true;
     try {
-      const session = await startPlayback(documentRef.current, startTick);
+      const session = playbackMode === "external"
+        ? await startExternalMidiPlayback(documentRef.current, externalMidiOutputId, startTick)
+        : await startPlayback(documentRef.current, startTick);
       if (request !== playbackRequestRef.current) {
         session?.stop();
         return;
@@ -2002,10 +2043,32 @@ export default function App() {
   }, [document, sessionReady]);
 
   useEffect(() => {
+    const focusedElement = globalThis.document.activeElement;
+    if (focusedElement instanceof HTMLButtonElement && focusedElement.closest(".toolbar")) focusedElement.blur();
+  }, [activeTool]);
+
+  useEffect(() => {
+    if (!midiOutputDialogOpen) return;
+    let cancelled = false;
+    setMidiOutputLoading(true);
+    setMidiOutputError(null);
+    void midiOutputPorts()
+      .then((outputs) => { if (!cancelled) setMidiOutputs(outputs); })
+      .catch((error) => { if (!cancelled) setMidiOutputError(error instanceof Error ? error.message : "Could not access MIDI outputs"); })
+      .finally(() => { if (!cancelled) setMidiOutputLoading(false); });
+    return () => { cancelled = true; };
+  }, [midiOutputDialogOpen]);
+
+  useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
       if (styleDialogOpen || manualOpen) return;
       const target = event.target;
       if (target instanceof HTMLElement && target.closest("input, textarea, select, [contenteditable='true']")) return;
+      const selectToolFromShortcut = (tool: Tool) => {
+        setActiveTool(tool);
+        const focusedElement = globalThis.document.activeElement;
+        if (focusedElement instanceof HTMLButtonElement && focusedElement.closest(".toolbar")) focusedElement.blur();
+      };
       if (event.ctrlKey || event.metaKey) {
         const key = event.key.toLowerCase();
         if (key === "o") {
@@ -2048,19 +2111,19 @@ export default function App() {
         else void playScore(pasteTargetRef.current?.time ?? 0);
       } else if (event.key === ",") {
         event.preventDefault();
-        setActiveTool("left");
+        selectToolFromShortcut("left");
       } else if (event.key === ".") {
         event.preventDefault();
-        setActiveTool("right");
+        selectToolFromShortcut("right");
       } else if (event.key.toLowerCase() === "b") {
         event.preventDefault();
-        setActiveTool("break");
+        selectToolFromShortcut("break");
       } else if (event.key.toLowerCase() === "a") {
         event.preventDefault();
-        setActiveTool("arpeggio");
+        selectToolFromShortcut("arpeggio");
       } else if (event.key.toLowerCase() === "t") {
         event.preventDefault();
-        setActiveTool(event.shiftKey ? "tempo" : "meter");
+        selectToolFromShortcut(event.shiftKey ? "tempo" : "meter");
       } else if (event.key === "ArrowLeft" && selectedNoteIdsRef.current.size) {
         event.preventDefault();
         transposeSelectedNotes(-1);
@@ -2406,6 +2469,9 @@ export default function App() {
     else if (item === "Score Info...") setScoreInfoDialogOpen(true);
     else if (item === "Style...") setStyleDialogOpen(true);
     else if (item === "Manual...") setManualOpen(true);
+    else if (item === "Use internal synth") choosePlaybackMode("internal");
+    else if (item === "Use External MIDI Port") choosePlaybackMode("external");
+    else if (item === "Select External MIDI Port...") setMidiOutputDialogOpen(true);
     else if (item === "Undo") undoDocument();
     else if (item === "Redo") redoDocument();
     else if (item === "Snap Band") editDocument((editableDocument) => {
@@ -2418,6 +2484,7 @@ export default function App() {
     File: ["New", "New Piano Template", "New Organ Template", "---", "Open...", "Import MIDI...", "Save", "Save As...", "Export PDF...", "---", "Set current file as default template", "Reset Default template"],
     Edit: ["Score Info...", "Style...", "Preferences...", "Undo", "Redo"],
     View: ["Snap Band"],
+    Playback: ["Use internal synth", "Use External MIDI Port", "---", "Select External MIDI Port..."],
     Help: ["Manual...", "About keyTAB"],
   };
 
@@ -2438,7 +2505,9 @@ export default function App() {
               <div className="menu-popover">
                 {menuItems[menu].map((item, index) => item === "---"
                   ? <hr key={`${menu}-separator-${index}`} />
-                  : <button type="button" key={item} onClick={() => selectMenuItem(item)}>{item}</button>)}
+                  : menu === "Playback" && (item === "Use internal synth" || item === "Use External MIDI Port")
+                    ? <button type="button" key={item} role="menuitemradio" aria-checked={(item === "Use internal synth") === (playbackMode === "internal")} className="menu-radio-item" onClick={() => selectMenuItem(item)}><span className="menu-radio" aria-hidden="true" />{item}</button>
+                    : <button type="button" key={item} onClick={() => selectMenuItem(item)}>{item}</button>)}
               </div>
             )}
           </div>
@@ -2464,6 +2533,8 @@ export default function App() {
         <IconButton label="Redo" onClick={redoDocument}><Redo2 size={19} /></IconButton>
         <IconButton label="Play score" active={isPlaying} onClick={() => void playScore()}><Play size={19} /></IconButton>
         <IconButton label="Stop playback" onClick={() => stopPlayback()}><Square size={16} /></IconButton>
+        <IconButton label="Style" onClick={() => setStyleDialogOpen(true)}><span className="toolbar-letter-button">S</span></IconButton>
+        <IconButton label="Score Info" onClick={() => setScoreInfoDialogOpen(true)}><span className="toolbar-letter-button">I</span></IconButton>
       </div>
       <main className="workbench">
         <aside className="snap-dock">
@@ -2482,7 +2553,7 @@ export default function App() {
         </aside>
         <section ref={canvasAreaRef} className="canvas-area" aria-label="Score workspace" onPointerDownCapture={startViewportPan} onPointerMove={updateViewportPan} onPointerUp={endViewportPan} onPointerCancel={endViewportPan}>
           <div className="paper-frame" style={{ width: `${document.pages[Math.min(pageIndex, document.pages.length - 1)].width_mm * PIXELS_PER_MM * zoom}px` }}>
-            <PaperPreview document={document} pageIndex={Math.min(pageIndex, document.pages.length - 1)} activeTool={activeTool} snapTicks={snapTicks} onEdit={editDocument} onOpenStaveMenu={setStaveMenu} onOpenTimeSignatureDialog={setTimeSignatureEdit} onOpenTempoDialog={setTempoEdit} selectedNoteIds={selectedNoteIds} onSelectionChange={selectNotes} onClearSelection={() => updateSelectedNoteIds([])} onPasteTargetChange={(target) => { pasteTargetRef.current = target; }} onAuditionNote={(pitch, velocity) => { void playNoteAudition(pitch, velocity); }} playbackTick={playbackTick} />
+            <PaperPreview document={document} pageIndex={Math.min(pageIndex, document.pages.length - 1)} activeTool={activeTool} snapTicks={snapTicks} onEdit={editDocument} onOpenStaveMenu={setStaveMenu} onOpenTimeSignatureDialog={setTimeSignatureEdit} onOpenTempoDialog={setTempoEdit} selectedNoteIds={selectedNoteIds} onSelectionChange={selectNotes} onClearSelection={() => updateSelectedNoteIds([])} onPasteTargetChange={(target) => { pasteTargetRef.current = target; }} onAuditionNote={auditionNote} playbackTick={playbackTick} />
           </div>
         </section>
         {pdfPagesMounted && <div aria-hidden="true" style={{ position: "fixed", left: "-100000px", top: 0, width: 0, height: 0, overflow: "hidden", opacity: 0, pointerEvents: "none" }}>
@@ -2519,6 +2590,18 @@ export default function App() {
         onClose={() => setMidiImport(null)}
         onImport={importMidiScore}
       />}
+      {midiOutputDialogOpen && <div className="dialog-backdrop" role="presentation" onMouseDown={() => setMidiOutputDialogOpen(false)}>
+        <section className="midi-output-dialog" role="dialog" aria-modal="true" aria-label="Select External MIDI Port" onMouseDown={(event) => event.stopPropagation()}>
+          <header><h2>Select External MIDI Port</h2><button type="button" aria-label="Close MIDI output selection" onClick={() => setMidiOutputDialogOpen(false)}>x</button></header>
+          <div className="midi-output-dialog-body">
+            {midiOutputLoading && <p>Searching for MIDI outputs...</p>}
+            {midiOutputError && <p className="midi-output-error">{midiOutputError}</p>}
+            {!midiOutputLoading && !midiOutputError && !midiOutputs.length && <p>No MIDI output ports are available.</p>}
+            {!midiOutputLoading && midiOutputs.map((output) => <label key={output.id} className="midi-output-option"><input type="radio" name="midi-output" checked={externalMidiOutputId === output.id} onChange={() => selectExternalMidiOutput(output.id)} />{output.name}</label>)}
+          </div>
+          <footer><button type="button" onClick={() => setMidiOutputDialogOpen(false)}>Cancel</button></footer>
+        </section>
+      </div>}
       {timeSignatureEdit && <TimeSignatureDialog
         numerator={timeSignatureEdit.numerator}
         denominator={timeSignatureEdit.denominator}

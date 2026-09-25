@@ -15,6 +15,21 @@ interface PlaybackNote {
   endTick: number;
 }
 
+export interface MidiOutputPort {
+  id: string;
+  name: string;
+}
+
+const midiAccess = async (): Promise<MIDIAccess> => {
+  if (!navigator.requestMIDIAccess) throw new Error("Web MIDI is not available in this environment");
+  return navigator.requestMIDIAccess();
+};
+
+export async function midiOutputPorts(): Promise<MidiOutputPort[]> {
+  const access = await midiAccess();
+  return [...access.outputs.values()].map((output) => ({ id: output.id, name: output.name || "Unnamed MIDI output" }));
+}
+
 export async function playNoteAudition(pitch: number, velocity = 100): Promise<void> {
   const Tone = await import("tone");
   await Tone.start();
@@ -25,6 +40,17 @@ export async function playNoteAudition(pitch: number, velocity = 100): Promise<v
   const duration = 0.18;
   synth.triggerAttackRelease(Tone.Frequency(pitch, "midi").toFrequency(), duration, undefined, Math.min(1, Math.max(0, velocity / 127)));
   window.setTimeout(() => synth.dispose(), (duration + 0.25) * 1000);
+}
+
+export async function playExternalMidiNote(outputId: string, pitch: number, velocity = 100): Promise<void> {
+  const access = await midiAccess();
+  const output = access.outputs.get(outputId);
+  if (!output) throw new Error("The selected MIDI output is no longer available");
+  const note = Math.min(127, Math.max(0, Math.round(pitch)));
+  const noteVelocity = Math.min(127, Math.max(1, Math.round(velocity)));
+  const startedAt = performance.now();
+  output.send([0x90, note, noteVelocity], startedAt);
+  output.send([0x80, note, 0], startedAt + 180);
 }
 
 const scoreNotes = (document: KeyTabDocument): PlaybackNote[] => {
@@ -113,6 +139,41 @@ export async function startPlayback(document: KeyTabDocument, startTick = 0): Pr
       stopped = true;
       synth.releaseAll();
       synth.dispose();
+    },
+  };
+}
+
+export async function startExternalMidiPlayback(document: KeyTabDocument, outputId: string, startTick = 0): Promise<PlaybackSession | null> {
+  const access = await midiAccess();
+  const output = access.outputs.get(outputId);
+  if (!output) throw new Error("The selected MIDI output is no longer available");
+  const notes = scoreNotes(document).filter((note) => note.endTick > startTick);
+  if (!notes.length) return null;
+  const changes = tempoChanges(document);
+  const startDelayMs = 50;
+  const playbackStartMs = performance.now() + startDelayMs;
+  const startSeconds = secondsAtTick(startTick, document.time_per_quarter, changes);
+  const scheduledEnd = Math.max(...notes.map((note) => secondsAtTick(note.endTick, document.time_per_quarter, changes) - startSeconds));
+  const activePitches = new Set<number>();
+  for (const note of notes) {
+    const noteStartMs = (secondsAtTick(Math.max(note.startTick, startTick), document.time_per_quarter, changes) - startSeconds) * 1000;
+    const noteEndMs = (secondsAtTick(note.endTick, document.time_per_quarter, changes) - startSeconds) * 1000;
+    const velocity = Math.min(127, Math.max(1, Math.round(note.velocity)));
+    output.send([0x90, note.pitch, velocity], playbackStartMs + noteStartMs);
+    output.send([0x80, note.pitch, 0], playbackStartMs + Math.max(noteStartMs + 10, noteEndMs));
+    activePitches.add(note.pitch);
+  }
+  let stopped = false;
+  return {
+    durationMs: Math.ceil((scheduledEnd + 1) * 1000),
+    startDelayMs,
+    endTick: Math.max(...notes.map((note) => note.endTick)),
+    tickAtElapsedMs: (elapsedMs) => tickAtSeconds(startSeconds + Math.max(0, elapsedMs - startDelayMs) / 1000, document.time_per_quarter, changes),
+    stop: () => {
+      if (stopped) return;
+      stopped = true;
+      for (const pitch of activePitches) output.send([0x80, pitch, 0]);
+      output.send([0xb0, 123, 0]);
     },
   };
 }
