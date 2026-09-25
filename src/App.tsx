@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ChangeEvent, type MouseEvent, type PointerEvent, type ReactNode } from "react";
+import { memo, useEffect, useRef, useState, type ChangeEvent, type MouseEvent, type PointerEvent, type ReactNode } from "react";
 import {
   ArrowLeft,
   ArrowRight,
@@ -1640,6 +1640,34 @@ function SystemPreview({
   );
 }
 
+const systemRenderKey = (document: KeyTabDocument, page: KeyTabDocument["pages"][number], system: System) => JSON.stringify({
+  layout: document.layout,
+  baseGrid: document.base_grid,
+  page: {
+    width: page.width_mm,
+    height: page.height_mm,
+    systemIndex: page.systems.findIndex(({ id }) => id === system.id),
+    systemCount: page.systems.length,
+  },
+  system,
+  tempoEvents: document.timeline_events.filter(({ start_tick }) => start_tick >= system.start_tick && start_tick < system.end_tick),
+});
+
+const systemNoteIds = (system: System) => new Set(system.staves.flatMap((stave) => stave.events.filter((event): event is NoteEvent => event.type === "note").map(({ id }) => id)));
+const sameSystemSelection = (first: ReadonlySet<string>, second: ReadonlySet<string>, system: System) => {
+  const noteIds = systemNoteIds(system);
+  return [...noteIds].every((id) => first.has(id) === second.has(id));
+};
+
+const MemoizedSystemPreview = memo(SystemPreview, (previous, next) => (
+  previous.activeTool === next.activeTool
+  && previous.snapTicks === next.snapTicks
+  && sameSystemSelection(previous.selectedNoteIds, next.selectedNoteIds, next.system)
+  && (previous.playbackTick !== null && previous.playbackTick >= previous.system.start_tick && previous.playbackTick <= previous.system.end_tick ? previous.playbackTick : null)
+    === (next.playbackTick !== null && next.playbackTick >= next.system.start_tick && next.playbackTick <= next.system.end_tick ? next.playbackTick : null)
+  && systemRenderKey(previous.document, previous.page, previous.system) === systemRenderKey(next.document, next.page, next.system)
+));
+
 function PaperPreview({ document, pageIndex, activeTool, snapTicks, onEdit, onBeginEditTransaction, onCommitEditTransaction, onOpenStaveMenu, onOpenTimeSignatureDialog, onOpenTempoDialog, selectedNoteIds, onSelectionChange, onClearSelection, onPasteTargetChange, onAuditionNote, playbackTick, exportOnly = false }: {
   document: KeyTabDocument;
   pageIndex: number;
@@ -1774,7 +1802,7 @@ function PaperPreview({ document, pageIndex, activeTool, snapTicks, onEdit, onBe
         <text x={titleX} y={titleY} dominantBaseline="hanging" className="score-title" style={{ fontFamily: resolveWebSafeFontFamily(document.layout.font_title.family), fontSize: metadataFontSize(document.layout.font_title.size_pt), fontWeight: document.layout.font_title.bold ? 700 : 400, fontStyle: document.layout.font_title.italic ? "italic" : "normal", textDecoration: document.layout.font_title.underline ? "underline" : "none" }}>{title}</text>
         {composer && <text x={composerX} y={titleY} textAnchor="end" dominantBaseline="hanging" className="score-composer" style={{ fontFamily: resolveWebSafeFontFamily(document.layout.font_composer.family), fontSize: metadataFontSize(document.layout.font_composer.size_pt), fontWeight: document.layout.font_composer.bold ? 700 : 400, fontStyle: document.layout.font_composer.italic ? "italic" : "normal", textDecoration: document.layout.font_composer.underline ? "underline" : "none" }}>{composer}</text>}
       </g>}
-      {page.systems.map((system) => <SystemPreview key={system.id} document={document} page={page} system={system} activeTool={activeTool} snapTicks={snapTicks} onEdit={onEdit} onBeginEditTransaction={onBeginEditTransaction} onCommitEditTransaction={onCommitEditTransaction} onOpenStaveMenu={onOpenStaveMenu} onOpenTimeSignatureDialog={onOpenTimeSignatureDialog} onOpenTempoDialog={onOpenTempoDialog} selectedNoteIds={selectedNoteIds} onSelectionChange={onSelectionChange} onClearSelection={onClearSelection} onPasteTargetChange={onPasteTargetChange} onAuditionNote={onAuditionNote} playbackTick={playbackTick} />)}
+      {page.systems.map((system) => <MemoizedSystemPreview key={system.id} document={document} page={page} system={system} activeTool={activeTool} snapTicks={snapTicks} onEdit={onEdit} onBeginEditTransaction={onBeginEditTransaction} onCommitEditTransaction={onCommitEditTransaction} onOpenStaveMenu={onOpenStaveMenu} onOpenTimeSignatureDialog={onOpenTimeSignatureDialog} onOpenTempoDialog={onOpenTempoDialog} selectedNoteIds={selectedNoteIds} onSelectionChange={onSelectionChange} onClearSelection={onClearSelection} onPasteTargetChange={onPasteTargetChange} onAuditionNote={onAuditionNote} playbackTick={playbackTick} />)}
       {pageSelectionRect && <g className="selection-overlay" pointerEvents="none" data-export="exclude"><rect x={Math.min(pageSelectionRect.startX, pageSelectionRect.endX)} y={Math.min(pageSelectionRect.startY, pageSelectionRect.endY)} width={Math.abs(pageSelectionRect.endX - pageSelectionRect.startX)} height={Math.abs(pageSelectionRect.endY - pageSelectionRect.startY)} fill="var(--accent)" fillOpacity={0.15} stroke="var(--accent)" strokeWidth={1.5} /></g>}
       <g className="svg-layer svg-layer-page_number"><text x={footerX} y={footerY} dominantBaseline="alphabetic" className="score-footer" style={{ fontFamily: resolveWebSafeFontFamily(document.layout.font_copyright.family), fontSize: metadataFontSize(document.layout.font_copyright.size_pt), fontWeight: document.layout.font_copyright.bold ? 700 : 400, fontStyle: document.layout.font_copyright.italic ? "italic" : "normal", textDecoration: document.layout.font_copyright.underline ? "underline" : "none" }}>{footer}</text></g>
     </svg>
@@ -1834,7 +1862,9 @@ export default function App() {
   const playbackStartingRef = useRef(false);
   const savedDocumentRef = useRef(serializeDocument(document));
   const editTransactionRef = useRef<{ before: KeyTabDocument; beforeContents: string; message: string } | null>(null);
+  const auditionSettingsRef = useRef({ mode: playbackMode, outputId: externalMidiOutputId });
   documentRef.current = document;
+  auditionSettingsRef.current = { mode: playbackMode, outputId: externalMidiOutputId };
   const snapTicks = Math.max(1, (256 * 4) / (snapBase * divider));
   const menus = ["File", "Edit", "View", "Playback", "Help"];
 
@@ -1861,8 +1891,9 @@ export default function App() {
   };
 
   const auditionNote = (pitch: number, velocity: number) => {
-    const audition = playbackMode === "external"
-      ? playExternalMidiNote(externalMidiOutputId, pitch, velocity)
+    const { mode, outputId } = auditionSettingsRef.current;
+    const audition = mode === "external"
+      ? playExternalMidiNote(outputId, pitch, velocity)
       : playNoteAudition(pitch, velocity);
     void audition.catch((error) => {
       const message = error instanceof Error ? error.message : "Unknown audio error";
