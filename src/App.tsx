@@ -17,6 +17,7 @@ import lineBreakIcon from "./assets/icons/line_break.png";
 import leftNoteIcon from "./assets/icons/note_left.png";
 import rightNoteIcon from "./assets/icons/note_right.png";
 import tempoIcon from "./assets/icons/tempo.png";
+import { SVG_DRAW_LAYERS, noteDrawingElement, sortByDrawingOrder, type SvgDrawLayer } from "./drawing_order";
 import timeSignatureIcon from "./assets/icons/time_signature.png";
 import { ScoreInfoDialog } from "./ScoreInfoDialog";
 import { StyleDialog } from "./StyleDialog";
@@ -91,32 +92,6 @@ const measureTextWidth = (text: string, fontFamily: string, fontSize: number, bo
   context.font = `${italic ? "italic " : ""}${bold ? "700 " : "400 "}${fontSize}px ${fontFamily}`;
   return context.measureText(text).width;
 };
-const SVG_DRAW_LAYERS = [
-  "page_background",
-  "snap_band",
-  "midi_body",
-  "grid_lines",
-  "barlines",
-  "stave_lines",
-  "ledger_lines",
-  "time_signature",
-  "measure_numbers",
-  "tempo",
-  "count_lines",
-  "notes",
-  "arpeggios",
-  "beams",
-  "editor_controls",
-  "break_overlay",
-  "meter_overlay",
-  "selection_overlay",
-  "playhead",
-  "input_overlay",
-  "page_number",
-] as const;
-
-type SvgDrawLayer = typeof SVG_DRAW_LAYERS[number];
-
 type Tool = "left" | "right" | "arpeggio" | "break" | "meter" | "tempo" | "count_line" | "slur-left" | "slur-right";
 type SystemBreakTarget =
   | { kind: "split"; time: number }
@@ -927,8 +902,8 @@ function SystemPreview({
   const noteGeometries = baseNoteGeometries.map(shiftArpeggioMember);
   const additionalNoteGeometries = baseAdditionalNoteGeometries.map(shiftArpeggioMember);
   const renderedNoteGeometries = [...noteGeometries, ...additionalNoteGeometries];
-  const noteGeometriesInPaintOrder = [...noteGeometries].sort((first, second) => Number(first.isBlackKey) - Number(second.isBlackKey));
-  const renderedNoteGeometriesInPaintOrder = [...renderedNoteGeometries].sort((first, second) => Number(first.isBlackKey) - Number(second.isBlackKey));
+  const noteGeometriesInPaintOrder = sortByDrawingOrder(noteGeometries, (geometry) => noteDrawingElement(geometry.isBlackKey));
+  const renderedNoteGeometriesInPaintOrder = sortByDrawingOrder(renderedNoteGeometries, (geometry) => noteDrawingElement(geometry.isBlackKey));
   const arpeggioMemberIds = new Set(arpeggioMemberStarts.keys());
   const arpeggioGeometries = staveTargets.flatMap((target) => target.stave.events
     .filter((event): event is ArpeggioEvent => event.type === "arpeggio" && event.start_tick >= system.start_tick && event.start_tick < system.end_tick)
@@ -1527,7 +1502,7 @@ function SystemPreview({
       })}
     </> : null,
     notes: <>
-      {renderedNoteGeometries.map((geometry) => {
+      {renderedNoteGeometriesInPaintOrder.map((geometry) => {
         const stopPath = geometry.stop ? `M ${geometry.stop.map(([pointX, pointY]) => `${pointX} ${pointY}`).join(" L ")}` : null;
         const selected = selectedNoteIds.has(geometry.note.id);
         const notationColor = selected ? "var(--accent)" : "var(--notation-color)";
@@ -1542,6 +1517,7 @@ function SystemPreview({
       })}
       {chordConnectors.map((connector) => <line key={`${connector.staveId}-${connector.tick}-${connector.x1}-${connector.x2}`} x1={connector.x1} y1={connector.y} x2={connector.x2} y2={connector.y} className="note-stem" strokeWidth={connector.strokeWidth} />)}
     </>,
+    expressions: null,
     arpeggios: arpeggioGeometries.map((geometry) => <g key={geometry.id} className="arpeggio">
       {(geometry.arpeggio.rtime1_ticks !== 0 || geometry.arpeggio.rtime2_ticks !== 0) && <line x1={geometry.lineStart.x} y1={geometry.lineStart.y} x2={geometry.lineEnd.x} y2={geometry.lineEnd.y} strokeWidth={geometry.strokeWidth} />}
       {activeTool === "arpeggio" && <g className="arpeggio-handles" data-export="exclude">
