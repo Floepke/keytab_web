@@ -54,13 +54,18 @@ const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 4;
 const DOUBLE_CLICK_DELAY_MS = 350;
 const BLACK_KEY_PITCH_CLASSES = new Set([1, 3, 6, 8, 10]);
+const timeComparison = new Operator();
 const isBlackKey = (pitch: number) => BLACK_KEY_PITCH_CLASSES.has(pitch % 12);
 const blackKeyWidthScale = (pitch: number, time: number, notes: readonly NoteEvent[], blackNoteRule: string) => {
   const hasAdjacentNote = notes.some((candidate) => candidate.pitch !== pitch
-    && Math.abs(candidate.time - time) < 1e-9
+    && timeComparison.eq(candidate.time, time)
     && Math.abs(candidate.pitch - pitch) === 1);
   return isBlackKey(pitch) && blackNoteRule === "below_stem" && hasAdjacentNote ? 0.7 : 1;
 };
+const uniqueMusicalTimes = (times: Iterable<number>) => Array.from(times).reduce<number[]>((unique, time) => {
+  if (!unique.some((existing) => timeComparison.eq(existing, time))) unique.push(time);
+  return unique;
+}, []);
 type Point = readonly [number, number];
 const pointInRect = ([x, y]: Point, left: number, top: number, right: number, bottom: number) => x >= left && x <= right && y >= top && y <= bottom;
 const segmentsIntersect = (firstStart: Point, firstEnd: Point, secondStart: Point, secondEnd: Point) => {
@@ -779,7 +784,7 @@ function SystemPreview({
   };
 
   const notes = stave.events.filter((event): event is NoteEvent => event.type === "note");
-  const time = new Operator();
+    const time = timeComparison;
   const scale = document.layout.scale * stave.scale;
   const noteWidthMm = semitoneMm * document.layout.note_width_scaling;
   const noteHeightMm = semitoneMm * 2 * document.layout.notehead_height_scaling;
@@ -812,14 +817,14 @@ function SystemPreview({
     const nextSameHand = notes.some((candidate) => candidate.id !== note.id && candidate.hand === note.hand && time.eq(candidate.time, note.time + note.duration));
     const midiHalfWidth = mmToPixels(semitoneMm);
     const stop = !note.continues_to_next && !nextSameHand ? [[x - midiHalfWidth, end - height], [x, end], [x + midiHalfWidth, end - height]] : null;
-    const dotTicks = [...new Set([
+    const dotTicks = uniqueMusicalTimes([
       ...measures,
       ...notes.filter((candidate) => candidate.hand === note.hand).flatMap((candidate) => [candidate.time, candidate.time + candidate.duration]),
       ...(note.continues_from_previous ? [note.time] : []),
       ...(note.continues_to_next ? [note.time + note.duration] : []),
-    ])].filter((tick) => (
-      (note.continues_from_previous && tick === note.time)
-      || (note.time < tick && (tick < note.time + note.duration || (note.continues_to_next && tick === note.time + note.duration)))
+    ]).filter((tick) => (
+      (note.continues_from_previous && time.eq(tick, note.time))
+      || (time.lt(note.time, tick) && (time.lt(tick, note.time + note.duration) || (note.continues_to_next && time.eq(tick, note.time + note.duration))))
     ));
     return { note, displayTime, staveId: stave.id, x, start, end, stemTipX, headPoints, headPath, body, filled, form, headUp, headHalfWidth: halfWidth, isBlackKey: isBlack, stop, noteHeightPx: mmToPixels(noteHeightMm), noteStrokePx, stopStrokePx: mmToPixels(document.layout.note_stopsign_thickness_mm * scale), dotRadiusPx: mmToPixels(document.layout.note_continuation_dot_size_mm * scale) / 2, dots: dotTicks.map((tick) => [x, yAt(tick) + mmToPixels(semitoneMm)] as const) };
   });
@@ -855,12 +860,15 @@ function SystemPreview({
       const body = [[x, start], [x - bodyHalfWidth, start + bodyHalfWidth], [x - bodyHalfWidth, end], [x + bodyHalfWidth, end], [x + bodyHalfWidth, start + bodyHalfWidth]];
       const nextSameHand = candidateNotes.some((candidate) => candidate.id !== note.id && candidate.hand === note.hand && time.eq(candidate.time, note.time + note.duration));
       const stop = !note.continues_to_next && !nextSameHand ? [[x - bodyHalfWidth, end - noteHeightPx], [x, end], [x + bodyHalfWidth, end - noteHeightPx]] : null;
-      const dotTicks = [...new Set([
+      const dotTicks = uniqueMusicalTimes([
         ...measures,
         ...candidateNotes.filter((candidate) => candidate.hand === note.hand).flatMap((candidate) => [candidate.time, candidate.time + candidate.duration]),
         ...(note.continues_from_previous ? [note.time] : []),
         ...(note.continues_to_next ? [note.time + note.duration] : []),
-      ])].filter((tick) => (note.continues_from_previous && tick === note.time) || (note.time < tick && (tick < note.time + note.duration || (note.continues_to_next && tick === note.time + note.duration))));
+      ]).filter((tick) => (
+        (note.continues_from_previous && time.eq(tick, note.time))
+        || (time.lt(note.time, tick) && (time.lt(tick, note.time + note.duration) || (note.continues_to_next && time.eq(tick, note.time + note.duration))))
+      ));
       return { note, displayTime, staveId: target.stave.id, x, start, end, stemTipX, headPoints, headPath: `M ${headPoints.map(([pointX, pointY]) => `${pointX} ${pointY}`).join(" L ")} Z`, body, filled, form, headUp, headHalfWidth: halfWidth, isBlackKey: isBlack, stop, noteHeightPx, noteStrokePx: candidateNoteStrokePx, stopStrokePx: mmToPixels(document.layout.note_stopsign_thickness_mm * candidateScale), dotRadiusPx: mmToPixels(document.layout.note_continuation_dot_size_mm * candidateScale) / 2, dots: dotTicks.map((tick) => [x, yAt(tick) + bodyHalfWidth] as const) };
     });
   });
@@ -1075,7 +1083,7 @@ function SystemPreview({
       return [x + halfWidth * Math.cos(angle), centerY + height * 0.5 * Math.sin(angle) + tilt];
     });
     const dotTicks = [...new Set([...measures, ...previewNotes.filter((note) => note.hand === activeTool).flatMap((note) => [note.time, note.time + note.duration])])]
-      .filter((tick) => previewTime < tick && tick < previewTime + snapTicks);
+      .filter((tick) => time.lt(previewTime, tick) && time.lt(tick, previewTime + snapTicks));
     const midiHalfWidth = mmToPixels(target.semitoneMm);
     return {
       x,

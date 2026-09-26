@@ -65,6 +65,31 @@ describe("keyTAB document model", () => {
     document.pages[0].systems[0].staves[0].events.push({ id: "note-1", type: "note", time: 256, duration: 128, pitch: 60, velocity: 64, hand: "left", notehead: "auto", color: "auto", acc: 0, continuation_id: null, continues_from_previous: false, continues_to_next: false });
     const restored = deserializeDocument(JSON.parse(serializeDocument(document)));
     expect(restored.pages[0].systems[0].staves[0].events[0]).toMatchObject({ type: "note", time: 256, pitch: 60 });
+    expect(restored.pages[0].systems[0].staves[0].events[0].id).toMatch(/^\d+$/);
+  });
+
+  it("omits runtime IDs and restores continuation and arpeggio references", () => {
+    const document = createDocument();
+    const system = document.pages[0].systems[0];
+    const stave = system.staves[0];
+    stave.events.push(
+      { id: "low", type: "note", time: 256, duration: 512, pitch: 60, velocity: 64, hand: "left", notehead: "auto", color: "auto", acc: 0, continuation_id: null, continues_from_previous: false, continues_to_next: false },
+      { id: "high", type: "note", time: 256, duration: 256, pitch: 64, velocity: 64, hand: "left", notehead: "auto", color: "auto", acc: 0, continuation_id: null, continues_from_previous: false, continues_to_next: false },
+      { id: "arp", type: "arpeggio", start_tick: 256, rtime1_ticks: 0, rtime2_ticks: 32, note_ids: ["low", "high"], note_pitches: [60, 64], hand: "left" },
+    );
+    splitSystemAt(document, system.id, 512);
+    const serialized = serializeDocument(document);
+    expect(serialized).not.toContain('"id"');
+    expect(serialized).not.toContain('"continuation_id"');
+    expect(serialized).not.toContain('"note_ids"');
+
+    const restored = deserializeDocument(JSON.parse(serialized));
+    const restoredSystems = restored.pages.flatMap((page) => page.systems);
+    const leading = restoredSystems[0].staves[0].events.find((event): event is Extract<typeof event, { type: "note" }> => event.type === "note" && event.pitch === 60)!;
+    const continuation = restoredSystems[1].staves[0].events.find((event): event is Extract<typeof event, { type: "note" }> => event.type === "note" && event.pitch === 60)!;
+    const arpeggio = restoredSystems[0].staves[0].events.find((event): event is Extract<typeof event, { type: "arpeggio" }> => event.type === "arpeggio")!;
+    expect(continuation.continuation_id).toBe(leading.continuation_id);
+    expect(arpeggio.note_ids).toEqual([leading.id, restoredSystems[0].staves[0].events.find((event): event is Extract<typeof event, { type: "note" }> => event.type === "note" && event.pitch === 64)!.id]);
   });
 
   it("loads existing keytab2-labelled files and writes the keytab-web format", () => {

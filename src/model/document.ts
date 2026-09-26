@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { createEvent, createFont, newId } from "./events";
 import { createBaseGrid, gridBoundaries, measureDuration, totalDuration, validateBaseGrid } from "./grid";
+import { Operator } from "./operator";
 import {
   FORMAT_NAME,
   FORMAT_VERSION,
@@ -19,6 +20,7 @@ import {
 const EXTRA_GAP_AFTER_PITCH_CLASSES = new Set([4, 11]);
 const PIANO_LOW_MIDI_PITCH = 21;
 const PIANO_HIGH_MIDI_PITCH = 108;
+const timeComparison = new Operator();
 
 export type ScoreTemplate = "piano" | "organ";
 
@@ -323,6 +325,92 @@ function parsePage(raw: unknown): Page {
   };
 }
 
+const documentIdObjects = (document: KeyTabDocument): Array<{ id: string }> => [
+  ...document.layout.grid_band_track,
+  ...document.timeline_events,
+  ...document.pages.flatMap((page) => [
+    page,
+    ...page.events,
+    ...page.systems.flatMap((system) => [
+      system,
+      ...system.events,
+      ...system.staves.flatMap((stave) => [stave, ...stave.events]),
+    ]),
+  ]),
+];
+
+const scoreEvents = (document: KeyTabDocument): ScoreEvent[] => [
+  ...document.layout.grid_band_track,
+  ...document.timeline_events,
+  ...document.pages.flatMap((page) => [
+    ...page.events,
+    ...page.systems.flatMap((system) => [
+      ...system.events,
+      ...system.staves.flatMap((stave) => stave.events),
+    ]),
+  ]),
+];
+
+function restoreContinuationIds(document: KeyTabDocument): void {
+  const systems = document.pages.flatMap((page) => page.systems);
+  for (const [systemIndex, system] of systems.entries()) {
+    const following = systems[systemIndex + 1];
+    if (!following) continue;
+    for (const [staveIndex, stave] of system.staves.entries()) {
+      const followingStave = following.staves[staveIndex];
+      if (!followingStave) continue;
+      const followingNotes = followingStave.events.filter((event): event is Extract<ScoreEvent, { type: "note" }> => event.type === "note");
+      for (const note of stave.events) {
+        if (note.type !== "note" || !note.continues_to_next) continue;
+        const continuationId = note.continuation_id ?? note.id;
+        note.continuation_id = continuationId;
+        const continuation = followingNotes.find((candidate) => candidate.continues_from_previous
+          && candidate.hand === note.hand
+          && candidate.pitch === note.pitch
+          && timeComparison.eq(candidate.time, following.start_tick)
+          && (candidate.continuation_id === null || candidate.continuation_id === continuationId));
+        if (continuation) continuation.continuation_id = continuationId;
+      }
+    }
+  }
+}
+
+function restoreArpeggioNoteIds(document: KeyTabDocument): void {
+  for (const system of document.pages.flatMap((page) => page.systems)) {
+    for (const stave of system.staves) {
+      const notes = stave.events.filter((event): event is Extract<ScoreEvent, { type: "note" }> => event.type === "note");
+      for (const event of stave.events) {
+        if (event.type !== "arpeggio" || event.note_ids.length) continue;
+        const pitches = new Set(event.note_pitches);
+        event.note_ids = notes
+          .filter((note) => note.hand === event.hand && pitches.has(note.pitch) && timeComparison.eq(note.time, event.start_tick))
+          .sort((first, second) => first.pitch - second.pitch)
+          .map((note) => note.id);
+      }
+    }
+  }
+}
+
+function assignRuntimeIds(document: KeyTabDocument): void {
+  const ids = new Map<string, string>();
+  let nextId = 1;
+  for (const value of documentIdObjects(document)) {
+    const runtimeId = String(nextId++);
+    ids.set(value.id, runtimeId);
+    value.id = runtimeId;
+  }
+  for (const event of scoreEvents(document)) {
+    if (event.type === "note" && event.continuation_id !== null) {
+      event.continuation_id = ids.get(event.continuation_id) ?? null;
+    }
+    if (event.type === "arpeggio") {
+      event.note_ids = event.note_ids.map((id) => ids.get(id)).filter((id): id is string => id !== undefined);
+    }
+  }
+  restoreContinuationIds(document);
+  restoreArpeggioNoteIds(document);
+}
+
 export function deserializeDocument(raw: unknown): KeyTabDocument {
   const data = headerSchema.parse(raw);
   if (!Array.isArray(data.base_grid) || !data.base_grid.length) {
@@ -363,6 +451,7 @@ export function deserializeDocument(raw: unknown): KeyTabDocument {
     modified_at: text(data.modified_at, new Date().toISOString()),
   };
   ensureInitialTempo(document);
+  assignRuntimeIds(document);
   reflowPages(document);
   return document;
 }
@@ -374,7 +463,10 @@ export function serializeDocument(document: KeyTabDocument): string {
     ...page,
     systems: systems.map(({ top_mm: _top, height_mm: _height, ...system }) => system),
   }));
-  return JSON.stringify({ ...snapshot, pages }, null, 2);
+  const compact = JSON.parse(JSON.stringify({ ...snapshot, pages }), (key, value) => (
+    key === "id" || key === "continuation_id" || key === "note_ids" ? undefined : value
+  ));
+  return JSON.stringify(compact, null, 2);
 }
 
 export function reflowPages(document: KeyTabDocument): void {

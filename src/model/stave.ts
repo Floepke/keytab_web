@@ -1,3 +1,5 @@
+import { Operator } from "./operator";
+const timeComparison = new Operator();
 import { engravingMm, engravingScale } from "./document";
 import type { KeyTabDocument, Layout, NoteEvent, Page, Stave, System } from "./types";
 
@@ -98,6 +100,8 @@ export function staveLinePitches(system: System, stave: Stave): number[] {
   const pitches = new Set(naturalLinePitches(stave));
   for (const event of stave.events) {
     if (event.type !== "note" || event.time >= system.end_tick || event.time + event.duration <= system.start_tick) continue;
+      if (event.type !== "note" || timeComparison.ge(event.time, system.end_tick) || timeComparison.le(event.time + event.duration, system.start_tick)) continue;
+      if (event.type !== "note" || timeComparison.ge(event.time, system.end_tick) || timeComparison.le(event.time + event.duration, system.start_tick)) continue;
     if (event.pitch < stave.pitch_range[0] || event.pitch > stave.pitch_range[1]) {
       ledgerLinePitchesForPitch(stave, event.pitch).forEach((pitch) => pitches.add(pitch));
       pitches.add(event.pitch);
