@@ -52,6 +52,7 @@ const PIXELS_PER_MM = 3;
 const ZOOM_FACTOR = 1.15;
 const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 4;
+const DOUBLE_CLICK_DELAY_MS = 350;
 const BLACK_KEY_PITCH_CLASSES = new Set([1, 3, 6, 8, 10]);
 const isBlackKey = (pitch: number) => BLACK_KEY_PITCH_CLASSES.has(pitch % 12);
 const blackKeyWidthScale = (pitch: number, time: number, notes: readonly NoteEvent[], blackNoteRule: string) => {
@@ -256,6 +257,7 @@ function SystemPreview({
   const countLineDragRef = useRef<{ id: string; staveId: string; part: "start" | "end" | "line"; pointerId: number; startTime: number; startPointerTime: number; startRpitch1: number; startRpitch2: number; startRpitch: number } | null>(null);
   const arpeggioDragRef = useRef<{ id: string; staveId: string; handle: "low" | "high"; pointerId: number } | null>(null);
   const selectionDragRef = useRef<{ pointerId: number; startX: number; startY: number; startClientX: number; startClientY: number; rightButton: boolean } | null>(null);
+  const pendingClickRef = useRef<number | null>(null);
   const suppressContextMenuRef = useRef(false);
   const [inputPreview, setInputPreview] = useState<{ staveId: string; time: number; pitch: number } | null>(null);
   const [systemBreakTarget, setSystemBreakTarget] = useState<SystemBreakTarget | null>(null);
@@ -268,9 +270,7 @@ function SystemPreview({
     return document.time_per_quarter * 4 / (change?.grid.denominator ?? 4);
   };
 
-  const editTempo = (event: MouseEvent<SVGElement>) => {
-    if (activeTool !== "tempo") return;
-    const { xMm, yMm } = pointAt(event);
+  const editTempoAt = (xMm: number, yMm: number) => {
     const existing = tempoTargetAt(xMm, yMm);
     if (existing) {
       onOpenTempoDialog({ id: existing.id });
@@ -477,9 +477,7 @@ function SystemPreview({
     return null;
   };
 
-  const editTimeSignature = (event: MouseEvent<SVGElement>) => {
-    if (activeTool !== "meter") return;
-    const { xMm, yMm } = pointAt(event);
+  const editTimeSignatureAt = (xMm: number, yMm: number) => {
     const target = meterTargetAt(xMm, yMm);
     if (!target) return;
     if (target.kind === "grid") {
@@ -497,6 +495,14 @@ function SystemPreview({
     if (target?.kind !== "grid") return;
     onEdit((editableDocument) => setTimeSignatureGridLine(editableDocument, target.time, false), "Grid line disabled");
   };
+
+  const clearPendingClick = () => {
+    if (pendingClickRef.current === null) return;
+    window.clearTimeout(pendingClickRef.current);
+    pendingClickRef.current = null;
+  };
+
+  useEffect(() => () => clearPendingClick(), []);
 
   const updateMeterHover = (event: PointerEvent<SVGElement>) => {
     if (activeTool !== "meter") return;
@@ -1579,36 +1585,39 @@ function SystemPreview({
 
   return (
     <g
-      onClick={(event) => { if (selectedNoteIds.size) onClearSelection(); else { editSystemBreak(event); editTimeSignature(event); editTempo(event); } }}
+      onClick={(event) => {
+        if (selectedNoteIds.size) {
+          onClearSelection();
+          return;
+        }
+        if (activeTool !== "meter" && activeTool !== "tempo") {
+          editSystemBreak(event);
+          return;
+        }
+        const { xMm, yMm } = pointAt(event);
+        clearPendingClick();
+        pendingClickRef.current = window.setTimeout(() => {
+          pendingClickRef.current = null;
+          if (activeTool === "meter") editTimeSignatureAt(xMm, yMm);
+          else editTempoAt(xMm, yMm);
+        }, DOUBLE_CLICK_DELAY_MS);
+      }}
+      onDoubleClick={(event) => {
+        if (event.button !== 0) return;
+        clearPendingClick();
+        if (activeTool === "count_line") removeCountLineAt(event);
+        else if (activeTool === "arpeggio") removeArpeggioAt(event);
+        else if (activeTool === "left" || activeTool === "right") removeNoteAt(event);
+        else if (activeTool === "meter") removeTimeSignatureGridLine(event);
+        else if (activeTool === "tempo") removeTempo(event);
+      }}
       onPointerDown={(event) => { if (!startSelectionDrag(event) && !startCountLineDrag(event) && !startArpeggioDrag(event)) startNoteDrag(event); }}
       onPointerOver={(event) => { updateSystemBreakHover(event); updateMeterHover(event); updateStaveControlHover(event); updatePasteTarget(event); }}
       onPointerMove={(event) => { updateSystemBreakHover(event); updateMeterHover(event); updateStaveControlHover(event); updatePasteTarget(event); if (!updateSelectionDrag(event) && !updateCountLineDrag(event) && !updateArpeggioDrag(event)) updateNoteDrag(event); }}
       onPointerUp={(event) => { if (!endSelectionDrag(event) && !endCountLineDrag(event) && !endArpeggioDrag(event)) endNoteDrag(event); }}
       onPointerCancel={(event) => { if (!endSelectionDrag(event) && !endCountLineDrag(event) && !endArpeggioDrag(event)) endNoteDrag(event); }}
       onPointerLeave={() => { clearInputPreview(); clearSystemBreakHover(); setMeterTarget(null); setHoveredStaveControlId(null); }}
-      onContextMenu={(event) => {
-        if (suppressContextMenuRef.current) {
-          suppressContextMenuRef.current = false;
-          event.preventDefault();
-          return;
-        }
-        if (activeTool === "count_line") {
-          if (removeCountLineAt(event)) event.preventDefault();
-          return;
-        }
-        if (activeTool === "arpeggio") {
-          if (removeArpeggioAt(event)) event.preventDefault();
-          return;
-        }
-        if (selectedNoteIds.size) {
-          onClearSelection();
-          event.preventDefault();
-          return;
-        }
-        removeNoteAt(event);
-        removeTimeSignatureGridLine(event);
-        removeTempo(event);
-      }}
+      onContextMenu={() => { suppressContextMenuRef.current = false; }}
     >
       <rect x={mmToPixels(systemBounds[0])} y={mmToPixels(system.top_mm - 10)} width={mmToPixels(systemBounds[1] - systemBounds[0])} height={mmToPixels(system.height_mm + 10)} fill="transparent" />
       {SVG_DRAW_LAYERS.map((layer) => <g key={layer} className={`svg-layer svg-layer-${layer}`}>{drawingGroups[layer]}</g>)}
@@ -1775,8 +1784,8 @@ function PaperPreview({ document, pageIndex, activeTool, snapTicks, onEdit, onBe
     >
       <g className="svg-layer svg-layer-page_background"><rect width={paperWidth} height={paperHeight} fill="#f4f0f0" /></g>
       {pageIndex === 0 && <g className="score-metadata">
-        <text x={titleX} y={titleY} dominantBaseline="hanging" className="score-title" style={{ fontFamily: resolveWebSafeFontFamily(document.layout.font_title.family), fontSize: metadataFontSize(document.layout.font_title.size_pt), fontWeight: document.layout.font_title.bold ? 700 : 400, fontStyle: document.layout.font_title.italic ? "italic" : "normal", textDecoration: document.layout.font_title.underline ? "underline" : "none" }}>{title}</text>
-        {composer && <text x={composerX} y={titleY} textAnchor="end" dominantBaseline="hanging" className="score-composer" style={{ fontFamily: resolveWebSafeFontFamily(document.layout.font_composer.family), fontSize: metadataFontSize(document.layout.font_composer.size_pt), fontWeight: document.layout.font_composer.bold ? 700 : 400, fontStyle: document.layout.font_composer.italic ? "italic" : "normal", textDecoration: document.layout.font_composer.underline ? "underline" : "none" }}>{composer}</text>}
+        <text x={titleX} y={titleY} textAnchor="start" dominantBaseline="hanging" alignmentBaseline="hanging" className="score-title" style={{ fontFamily: resolveWebSafeFontFamily(document.layout.font_title.family), fontSize: metadataFontSize(document.layout.font_title.size_pt), fontWeight: document.layout.font_title.bold ? 700 : 400, fontStyle: document.layout.font_title.italic ? "italic" : "normal", textDecoration: document.layout.font_title.underline ? "underline" : "none" }}>{title}</text>
+        {composer && <text x={composerX} y={titleY} textAnchor="end" dominantBaseline="hanging" alignmentBaseline="hanging" className="score-composer" style={{ fontFamily: resolveWebSafeFontFamily(document.layout.font_composer.family), fontSize: metadataFontSize(document.layout.font_composer.size_pt), fontWeight: document.layout.font_composer.bold ? 700 : 400, fontStyle: document.layout.font_composer.italic ? "italic" : "normal", textDecoration: document.layout.font_composer.underline ? "underline" : "none" }}>{composer}</text>}
       </g>}
       {page.systems.map((system) => <MemoizedSystemPreview key={system.id} document={document} page={page} system={system} activeTool={activeTool} snapTicks={snapTicks} onEdit={onEdit} onBeginEditTransaction={onBeginEditTransaction} onCommitEditTransaction={onCommitEditTransaction} onOpenStaveMenu={onOpenStaveMenu} onOpenTimeSignatureDialog={onOpenTimeSignatureDialog} onOpenTempoDialog={onOpenTempoDialog} selectedNoteIds={selectedNoteIds} onSelectionChange={onSelectionChange} onClearSelection={onClearSelection} onPasteTargetChange={onPasteTargetChange} onAuditionNote={onAuditionNote} playbackTick={playbackTick} />)}
       {pageSelectionRect && <g className="selection-overlay" pointerEvents="none" data-export="exclude"><rect x={Math.min(pageSelectionRect.startX, pageSelectionRect.endX)} y={Math.min(pageSelectionRect.startY, pageSelectionRect.endY)} width={Math.abs(pageSelectionRect.endX - pageSelectionRect.startX)} height={Math.abs(pageSelectionRect.endY - pageSelectionRect.startY)} fill="var(--accent)" fillOpacity={0.15} stroke="var(--accent)" strokeWidth={1.5} /></g>}
