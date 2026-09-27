@@ -77,7 +77,7 @@ const createWindow = () => {
     minWidth: 960,
     minHeight: 640,
     autoHideMenuBar: true,
-    show: true,
+    show: false,
     icon,
     webPreferences: {
       contextIsolation: true,
@@ -112,10 +112,12 @@ const createWindow = () => {
   });
   mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedUrl) => {
     console.error(`Could not load keyTAB renderer (${errorCode}): ${errorDescription} (${validatedUrl})`);
+    mainWindow?.loadURL(`data:text/html,${encodeURIComponent(`<!doctype html><title>keyTAB failed to start</title><body><h1>keyTAB failed to start</h1><p>The app renderer could not be loaded.</p><pre>${errorDescription}\n${validatedUrl}</pre></body>`)}`);
     mainWindow?.show();
   });
   void mainWindow.loadFile(rendererPath).catch((error) => {
     console.error("Could not load keyTAB renderer", error);
+    mainWindow?.loadURL(`data:text/html,${encodeURIComponent(`<!doctype html><title>keyTAB failed to start</title><body><h1>keyTAB failed to start</h1><pre>${String(error)}</pre></body>`)}`);
     mainWindow?.show();
   });
 };
