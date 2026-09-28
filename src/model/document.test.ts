@@ -92,12 +92,15 @@ describe("keyTAB document model", () => {
     expect(arpeggio.note_ids).toEqual([leading.id, restoredSystems[0].staves[0].events.find((event): event is Extract<typeof event, { type: "note" }> => event.type === "note" && event.pitch === 64)!.id]);
   });
 
-  it("loads existing keytab2-labelled files and writes the keytab-web format", () => {
+  it("loads legacy-labelled files and writes the keyTAB_web format", () => {
     const serialized = JSON.parse(serializeDocument(createDocument()));
     serialized.format = "keytab2";
     const restored = deserializeDocument(serialized);
-    expect(restored.format).toBe("keytab-web");
-    expect(JSON.parse(serializeDocument(restored)).format).toBe("keytab-web");
+    expect(restored.format).toBe("keyTAB_web");
+    expect(JSON.parse(serializeDocument(restored)).format).toBe("keyTAB_web");
+
+    serialized.format = "keytab-web";
+    expect(deserializeDocument(serialized).format).toBe("keyTAB_web");
   });
 
   it("restores the required initial tempo marker when loading a score without one", () => {

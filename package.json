@@ -44,7 +44,7 @@
   },
   "build": {
     "appId": "org.keytab.keytab",
-    "productName": "keyTAB",
+    "productName": "keyTAB_web",
     "directories": {
       "output": "release"
     },
@@ -61,7 +61,7 @@
         "ext": "ktw",
         "name": "keyTAB score",
         "description": "keyTAB score",
-        "mimeType": "application/x-keytab-web"
+        "mimeType": "application/x-keytab_web"
       }
     ],
     "win": {

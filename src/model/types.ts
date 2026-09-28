@@ -1,4 +1,5 @@
-export const FORMAT_NAME = "keytab-web";
+export const FORMAT_NAME = "keyTAB_web";
+export const LEGACY_WEB_FORMAT_NAME = "keytab-web";
 export const LEGACY_FORMAT_NAME = "keytab2";
 export const FORMAT_VERSION = 1;
 export const TIME_PER_QUARTER = 256;

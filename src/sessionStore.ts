@@ -21,7 +21,7 @@ type FilePickerWindow = Window & {
   showSaveFilePicker?: (options: object) => Promise<StoredFileHandle>;
 };
 
-const DATABASE_NAME = "keytab-web";
+const DATABASE_NAME = "keyTAB_web";
 const STORE_NAME = "session";
 const SESSION_KEY = "recovery";
 const LAST_FILE_KEY = "last-file";

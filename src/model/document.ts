@@ -6,6 +6,7 @@ import {
   FORMAT_NAME,
   FORMAT_VERSION,
   LEGACY_FORMAT_NAME,
+  LEGACY_WEB_FORMAT_NAME,
   TIME_PER_QUARTER,
   type BaseGrid,
   type KeyTabDocument,
@@ -46,7 +47,7 @@ const ledgerLineGroups = (): number[][] => {
 const LEDGER_LINE_GROUPS = ledgerLineGroups();
 
 const headerSchema = z.object({
-  format: z.union([z.literal(FORMAT_NAME), z.literal(LEGACY_FORMAT_NAME)]),
+  format: z.union([z.literal(FORMAT_NAME), z.literal(LEGACY_WEB_FORMAT_NAME), z.literal(LEGACY_FORMAT_NAME)]),
   format_version: z.literal(FORMAT_VERSION),
   time_per_quarter: z.literal(TIME_PER_QUARTER),
 }).passthrough();
