@@ -1,4 +1,4 @@
-:root { font-family: "Noto Sans", "Segoe UI", sans-serif; color: #d9dde2; background: #11161d; font-synthesis: none; --surface-deep: #11161d; --surface: #1a212b; --surface-raised: #242d38; --surface-hover: #303b49; --border: #465361; --text: #d9dde2; --muted: #9ba8b6; --accent: #c9544d; --accent-strong: #f1897e; --notation-color: #111b2a; --paper-ink: var(--notation-color); }
+:root { color-scheme: light; font-family: "Noto Sans", "Segoe UI", sans-serif; color: #d9dde2; background: #11161d; font-synthesis: none; --surface-deep: #11161d; --surface: #1a212b; --surface-raised: #242d38; --surface-hover: #303b49; --border: #465361; --text: #d9dde2; --muted: #9ba8b6; --accent: #c9544d; --accent-strong: #f1897e; --notation-color: #111b2a; --paper-ink: var(--notation-color); }
 * { box-sizing: border-box; }
 html, body, #root { width: 100%; height: 100%; overflow: hidden; }
 body { margin: 0; min-width: 320px; }

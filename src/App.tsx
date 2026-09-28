@@ -1790,7 +1790,7 @@ function PaperPreview({ document, pageIndex, activeTool, snapTicks, onEdit, onBe
         }
       }}
     >
-      <g className="svg-layer svg-layer-page_background"><rect width={paperWidth} height={paperHeight} fill="#f4f0f0" /></g>
+      <g className="svg-layer svg-layer-page_background"><rect width={paperWidth} height={paperHeight} fill="#ffffff" /></g>
       {pageIndex === 0 && <g className="score-metadata">
         <text x={titleX} y={titleY} textAnchor="start" dominantBaseline="hanging" alignmentBaseline="hanging" className="score-title" style={{ fontFamily: resolveWebSafeFontFamily(document.layout.font_title.family), fontSize: metadataFontSize(document.layout.font_title.size_pt), fontWeight: document.layout.font_title.bold ? 700 : 400, fontStyle: document.layout.font_title.italic ? "italic" : "normal", textDecoration: document.layout.font_title.underline ? "underline" : "none" }}>{title}</text>
         {composer && <text x={composerX} y={titleY} textAnchor="end" dominantBaseline="hanging" alignmentBaseline="hanging" className="score-composer" style={{ fontFamily: resolveWebSafeFontFamily(document.layout.font_composer.family), fontSize: metadataFontSize(document.layout.font_composer.size_pt), fontWeight: document.layout.font_composer.bold ? 700 : 400, fontStyle: document.layout.font_composer.italic ? "italic" : "normal", textDecoration: document.layout.font_composer.underline ? "underline" : "none" }}>{composer}</text>}
